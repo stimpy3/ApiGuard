@@ -1,0 +1,48 @@
+# Copy this next to your OpenAPI spec and adjust.
+#
+# Only `spec` is required. Omitting a section disables the check that needs it,
+# so a team with a hand-written spec still gets breaking-change detection
+# without having to invent a generator.
+
+spec:
+  # The committed contract, relative to this file.
+  path: openapi.yaml
+
+  # What to compare against. Also accepts a path (./old.yaml) or an https:// URL.
+  base: "git:origin/main"
+
+  # Enables the freshness check. Must print the spec to stdout.
+  #
+  # When running api-guard from its Docker image this will NOT work: the image
+  # holds oasdiff and Schemathesis, not your project's dependencies. Generate
+  # the spec in a step that has them and pass --generated-spec instead. Keep
+  # this line for local runs, where api-guard shares your interpreter.
+  generate_cmd: "python scripts/export_openapi.py --stdout"
+
+# Omit this whole section to skip the conformance check.
+runtime:
+  url: http://localhost:8000
+  checks:
+    - not_a_server_error
+    - response_schema_conformance
+    - status_code_conformance
+  max_examples: 50
+  wait_for_schema: 30
+  # On by default. For a build gate a failure that will not reproduce is worse
+  # than no check at all, because people learn to re-run until it goes green.
+  deterministic: true
+
+policy:
+  fail_on: ERR              # ERR or WARN. Not INFO - oasdiff rejects it.
+  deprecation_days_stable: 180
+  deprecation_days_beta: 30
+  waivers: waivers.yaml
+  # Optional oasdiff severity-levels file, for rules your team has collectively
+  # decided do not apply. Distinct from a waiver: a policy covers a class of
+  # change permanently, a waiver covers one change temporarily.
+  # severity_levels: .oasdiff-severity
+
+report:
+  dir: api-guard-report
+  # json is required: the MCP server, PR comments and dashboards all read it.
+  formats: [markdown, json, junit]

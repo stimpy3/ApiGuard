@@ -1,0 +1,34 @@
+# Breaking changes that were detected, understood, and allowed through anyway.
+#
+# An empty file is the healthy state. Every entry is a promise somebody made to
+# consumers and then decided to break, so each needs a reason worth reading, a
+# name against it, and a date after which it stops working.
+#
+# Before adding one, check whether the change can be made without breaking
+# anything instead:
+#
+#   * Retiring an ENDPOINT? Set `deprecated: true` and an `x-sunset` date, ship
+#     that, and delete it after the date. No waiver needed - the tool checks the
+#     promise was kept.
+#
+#   * A RESPONSE FIELD has no sunset mechanism. The breaking moment is demoting
+#     it from required to optional; once optional, deleting it is free. Add the
+#     replacement field first, then demote. The demotion is what needs waiving.
+#
+# The fingerprint is printed in the output of the build that was blocked.
+
+- fingerprint: "3c11fcf1ab0e"
+  # These two are for whoever reviews the pull request. Matching is on the
+  # fingerprint alone, so they cannot drift into being load-bearing.
+  id: response-property-became-optional
+  path: /users
+
+  # "temp fix" is not a reason. A year from now somebody has to decide whether
+  # this is still acceptable, and this line is all they will have.
+  reason: "PROD-142 - email superseded by phone. Web and mobile both confirmed migrated on 2026-09-15."
+  approved_by: sohan
+
+  # After this date the build fails until somebody re-justifies or removes it.
+  # Waivers rot; an ignore list that lives forever silently swallows future
+  # breakages on the same endpoint, which is how a gate stops being one.
+  expires: 2026-12-31
