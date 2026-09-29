@@ -26,11 +26,22 @@ ai = [
     "langchain-groq>=0.2",
     "langchain-core>=0.3",
     "langgraph>=0.2",
+    # Paused reviews are saved to a file so `approve` can resume them from a
+    # different process, days later. The in-memory saver cannot do that.
+    "langgraph-checkpoint-sqlite>=2.0",
     "mcp>=1.2",
+    # Lets `api-guard ask` use this project's own MCP server as Groq's tools.
+    # It currently requires mcp<2, which pins the line above to 1.x.
+    "langchain-mcp-adapters>=0.1",
     # Lets a local run pick up GROQ_API_KEY from .env. In CI the key arrives as
     # a real environment variable from the secret store instead, so this is a
     # developer convenience rather than the mechanism.
     "python-dotenv>=1.0",
+]
+# The web page for `api-guard ask`. Separate from [ai] because a CI image needs
+# the agent's libraries but has no use for a web server.
+ui = [
+    "streamlit>=1.40",
 ]
 dev = [
     "pytest>=8",

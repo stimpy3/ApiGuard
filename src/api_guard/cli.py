@@ -1,6 +1,8 @@
 """Command-line entry point.
 
     api-guard check --config api-guard.yaml
+    api-guard review --id 42              # check, then pause for approval if blocked
+    api-guard approve 42 --by <name>      # resume it, from any later process
 
 Exit codes follow the tools we wrap, so any CI understands them unaided:
 
@@ -29,17 +31,23 @@ from api_guard.verdict import EXIT_TOOL_ERROR, RunResult, decide
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="api-guard", description=__doc__)
+    parser = argparse.ArgumentParser(
+        prog="api-guard",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    check = sub.add_parser("check", help="Run the contract checks.")
-    check.add_argument(
+    # Shared by `check` and `review`: review is a check followed by the
+    # approval workflow, so it takes exactly the same inputs.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
         "--config",
         type=Path,
         default=Path("api-guard.yaml"),
         help="Path to api-guard.yaml (default: ./api-guard.yaml).",
     )
-    check.add_argument(
+    common.add_argument(
         "--generated-spec",
         type=Path,
         default=None,
@@ -49,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
             "project's dependencies. Takes precedence over spec.generate_cmd."
         ),
     )
-    check.add_argument(
+    common.add_argument(
         "--only",
         default=None,
         metavar="CHECK[,CHECK]",
@@ -60,7 +68,7 @@ def main(argv: list[str] | None = None) -> int:
             "deployed container is meaningless."
         ),
     )
-    check.add_argument(
+    common.add_argument(
         "--url",
         default=None,
         help=(
@@ -69,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
             "those are different addresses."
         ),
     )
-    check.add_argument(
+    common.add_argument(
         "--explain",
         action="store_true",
         help=(
@@ -78,9 +86,79 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
 
+    sub.add_parser("check", parents=[common], help="Run the contract checks.")
+
+    review = sub.add_parser(
+        "review",
+        parents=[common],
+        help=(
+            "Run the checks, then the approval workflow. A blocked build pauses "
+            "and saves its state; the exit code is the same as `check`."
+        ),
+    )
+    review.add_argument(
+        "--id",
+        dest="review_id",
+        default=None,
+        help="Name for this review, e.g. the CI build number (default: random).",
+    )
+    review.add_argument(
+        "--state",
+        type=Path,
+        default=None,
+        help="SQLite file holding paused reviews (default: .api-guard/reviews.db).",
+    )
+
+    approve = sub.add_parser(
+        "approve",
+        help=(
+            "Resume a paused review with a named approver. Records sign-off in "
+            "the report; the reviewed run's verdict is unchanged."
+        ),
+    )
+    approve.add_argument("review_id", help="The id printed by `api-guard review`.")
+    approve.add_argument("--by", required=True, help="Who is approving.")
+    approve.add_argument("--state", type=Path, default=None, help="Same file as `review --state`.")
+    approve.add_argument(
+        "--out",
+        type=Path,
+        default=Path("api-guard-report") / "review.md",
+        help="Where to write the signed-off report (default: api-guard-report/review.md).",
+    )
+
+    ask = sub.add_parser(
+        "ask",
+        help=(
+            "Ask about past builds. Groq investigates using the MCP server's "
+            "read-only tools. Needs GROQ_API_KEY; never affects a verdict."
+        ),
+    )
+    ask.add_argument("question", nargs="+", help='e.g. "why did build 42 fail?"')
+    ask.add_argument(
+        "--job",
+        default=None,
+        help=(
+            "Jenkins job path (default: $JENKINS_JOB or sample-api). For a "
+            "multibranch job: sample-api-local/job/demo%%252Fbreaking-rename"
+        ),
+    )
+    ask.add_argument("--jenkins-url", default=None, help="Default: $JENKINS_URL or http://localhost:8081.")
+
+    ui = sub.add_parser("ui", help="Open a web page for `ask` (needs the ui extra: streamlit).")
+    ui.add_argument("--port", type=int, default=8501)
+
     args = parser.parse_args(argv)
 
-    if args.command == "check":
+    if args.command == "ui":
+        return _ui(args.port)
+
+    if args.command == "ask":
+        return _ask(" ".join(args.question), job=args.job, jenkins_url=args.jenkins_url)
+
+    if args.command == "approve":
+        return _approve(args.review_id, args.by, state=args.state, out=args.out)
+
+    if args.command in ("check", "review"):
         selected = None
         if args.only is not None:
             selected = {name.strip() for name in args.only.split(",") if name.strip()}
@@ -96,6 +174,7 @@ def main(argv: list[str] | None = None) -> int:
             url=args.url,
             only=selected,
             explain=args.explain,
+            review=(args.state, args.review_id) if args.command == "review" else None,
         )
     parser.error(f"unknown command {args.command}")
     return EXIT_TOOL_ERROR
@@ -119,6 +198,7 @@ def _run_check(
     url: str | None,
     only: set[str] | None,
     explain: bool,
+    review: tuple[Path | None, str | None] | None = None,
 ) -> int:
     try:
         config = load(config_path)
@@ -161,6 +241,10 @@ def _run_check(
     )
 
     _print_summary(result, written)
+
+    if review is not None:
+        _start_review(result, *review, report_dir=config.resolve(config.report.dir))
+
     return result.exit_code
 
 
@@ -308,6 +392,127 @@ def _explain(result: RunResult) -> str | None:
             file=sys.stderr,
         )
     return analysis
+
+
+def _start_review(
+    result: RunResult, state: Path | None, review_id: str | None, *, report_dir: Path
+) -> None:
+    """Run the approval workflow on a finished check.
+
+    Like --explain, a failure here is reported and then ignored: the exit code
+    was fixed by the checks, and a missing extra or a clashing id must not turn
+    a contract violation into a tooling error or vice versa.
+
+    Writes approval-request.md only when the review is paused. CI checks for
+    that file rather than parsing console output, so a stale copy from an
+    earlier run in the same workspace is removed first.
+    """
+    request = report_dir / "approval-request.md"
+    request.unlink(missing_ok=True)
+
+    try:
+        from api_guard.ai import review as workflow
+    except ImportError:
+        print("api-guard: review needs the AI extra: pip install 'api-guard[ai]'", file=sys.stderr)
+        return
+
+    state = state or workflow.DEFAULT_STATE
+    try:
+        outcome = workflow.start(result, state=state, review_id=review_id)
+    except workflow.ReviewError as exc:
+        print(f"api-guard: review not started: {exc}", file=sys.stderr)
+        return
+
+    if outcome.paused:
+        print(f"\n  Review {outcome.review_id} is waiting for approval.")
+        print("  " + outcome.question.replace("\n", "\n  "))
+        print(f"\n  To sign off:  api-guard approve {outcome.review_id} --by <name> --state {state}")
+        request.parent.mkdir(parents=True, exist_ok=True)
+        request.write_text(
+            f"Review {outcome.review_id}\n\n{outcome.question}\n", encoding="utf-8"
+        )
+        return
+
+    path = report_dir / "review.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(outcome.report, encoding="utf-8")
+    print(f"\n  Review {outcome.review_id} complete, no approval needed: {path}")
+
+
+def _approve(review_id: str, approved_by: str, *, state: Path | None, out: Path) -> int:
+    """Resume a paused review. Exit 0 once sign-off is recorded, 2 otherwise."""
+    try:
+        from api_guard.ai import review as workflow
+    except ImportError:
+        print("api-guard: approve needs the AI extra: pip install 'api-guard[ai]'", file=sys.stderr)
+        return EXIT_TOOL_ERROR
+
+    try:
+        outcome = workflow.approve(review_id, approved_by, state=state or workflow.DEFAULT_STATE)
+    except workflow.ReviewError as exc:
+        print(f"api-guard: {exc}", file=sys.stderr)
+        return EXIT_TOOL_ERROR
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(outcome.report, encoding="utf-8")
+    print(f"Review {review_id} approved by {outcome.approved_by}: {out}")
+    return 0
+
+
+def _ask(question: str, *, job: str | None, jenkins_url: str | None) -> int:
+    """Answer a question about past builds. Exit 0 with an answer, 2 otherwise."""
+    try:
+        from api_guard.ai import agent
+    except ImportError:
+        print("api-guard: ask needs the AI extra: pip install 'api-guard[ai]'", file=sys.stderr)
+        return EXIT_TOOL_ERROR
+
+    try:
+        answer = agent.ask(question, job=job, jenkins_url=jenkins_url)
+    except agent.AskError as exc:
+        print(f"api-guard: {exc}", file=sys.stderr)
+        return EXIT_TOOL_ERROR
+
+    # Model output contains typographic characters (narrow spaces, dashes) that
+    # a Windows cp1252 console cannot encode. Degrade them, don't crash on them.
+    try:
+        sys.stdout.reconfigure(errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
+    if answer.steps:
+        print("Investigated: " + " -> ".join(answer.steps) + "\n")
+    print(answer.text)
+    print()
+    if answer.confidence:
+        print(f"Model's confidence: {answer.confidence}"
+              + (f" - {answer.confidence_reason}" if answer.confidence_reason else ""))
+    else:
+        print("Model's confidence: not stated")
+    for warning in answer.warnings:
+        print(f"Check: {warning}")
+    print(f"\n({answer.CAUTION})")
+    return 0
+
+
+def _ui(port: int) -> int:
+    """Start the Streamlit page. Streamlit runs a script file, not a function,
+    so this hands it the module's path."""
+    try:
+        import streamlit  # noqa: F401
+    except ImportError:
+        print("api-guard: ui needs the ui extra: pip install 'api-guard[ai,ui]'", file=sys.stderr)
+        return EXIT_TOOL_ERROR
+
+    page = Path(__file__).parent / "ai" / "ui.py"
+    return subprocess.call(
+        [sys.executable, "-m", "streamlit", "run", str(page),
+         "--server.port", str(port), "--browser.gatherUsageStats", "false",
+         # Without this, a first run blocks on an interactive email prompt.
+         "--server.headless", "true",
+         # A local tool: no "Deploy to Streamlit Cloud" button.
+         "--client.toolbarMode", "minimal"]
+    )
 
 
 def _print_summary(result: RunResult, written: dict[str, Path]) -> None:

@@ -29,6 +29,11 @@ from api_guard.ai.evidence import Evidence
 # a different question: how much human attention does it deserve?
 Band = Literal["routine", "risky", "unknown"]
 
+# A two-way label from a pre-parsed list is a small job, so it gets Groq's
+# smaller, faster model rather than the one explain.py uses for prose.
+# Separate variable so the two can be tuned independently.
+DEFAULT_CLASSIFY_MODEL = "openai/gpt-oss-20b"
+
 
 class Severity(BaseModel):
     band: Band = Field(description="routine, risky, or unknown.")
@@ -52,8 +57,13 @@ class State(TypedDict, total=False):
     report: str
 
 
-def build(evidence: Evidence, *, checkpointer: Any | None = None):
-    """Compile the workflow. Returns None if langgraph is not installed."""
+def build(evidence: Evidence | None, *, checkpointer: Any | None = None):
+    """Compile the workflow. Returns None if langgraph is not installed.
+
+    `evidence` is None when resuming a saved run: the facts are already in the
+    checkpoint, and loading them again would mean the pause did not really
+    persist anything.
+    """
     try:
         from langgraph.graph import END, START, StateGraph
     except ImportError:
@@ -81,8 +91,13 @@ def build(evidence: Evidence, *, checkpointer: Any | None = None):
     return graph.compile(checkpointer=checkpointer)
 
 
-def _loader(evidence: Evidence):
+def _loader(evidence: Evidence | None):
     def load_evidence(_state: State) -> State:
+        if evidence is None:
+            raise RuntimeError(
+                "load_evidence ran on a resume-only graph; the checkpoint should "
+                "already hold the evidence"
+            )
         return {
             "evidence_label": evidence.describe(),
             "verdict": evidence.verdict(),
@@ -113,7 +128,7 @@ def _classify(state: State) -> State:
 
         model = ChatGroq(
             api_key=key,
-            model=os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b"),
+            model=os.environ.get("GROQ_CLASSIFY_MODEL", DEFAULT_CLASSIFY_MODEL),
             temperature=0,
             timeout=45,
             max_retries=1,
@@ -122,7 +137,9 @@ def _classify(state: State) -> State:
             f"- {c.get('id')}: {c.get('text')} ({c.get('operation')} {c.get('path')})"
             for c in changes[:8]
         )
-        answer = model.with_structured_output(Severity).invoke(
+        # json_schema, not the default tool calling: gpt-oss-20b lowercases the
+        # tool name ("severity" for Severity) and Groq rejects the call.
+        answer = model.with_structured_output(Severity, method="json_schema").invoke(
             "Classify how much human attention these API contract changes need.\n\n"
             f"{listed}\n\n"
             "'routine' if a reviewer would wave this through — additive, or a "
@@ -170,7 +187,9 @@ def _approval(state: State) -> State:
         return {"approved_by": None}
 
     summary = (
-        f"{len(state.get('changes', []))} breaking change(s). "
+        # All detected changes, not only those at the blocking threshold, so
+        # "breaking" would overstate it; the gate's own summary gives that count.
+        f"{len(state.get('changes', []))} contract change(s) detected. "
         f"Advisory band: {state.get('band', 'unknown')}. "
         f"{state.get('rationale', '')}\n\n"
         "Approve shipping this anyway?"

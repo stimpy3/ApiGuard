@@ -53,7 +53,9 @@ class LocalEvidence:
         return str(self._result.verdict)
 
     def changes(self) -> list[dict]:
-        return [c.model_dump() for c in self._result.changes]
+        # mode="json": plain strings rather than enums, so the state can be
+        # checkpointed to disk and read back by another process.
+        return [c.model_dump(mode="json") for c in self._result.changes]
 
     def conformance_failures(self) -> list[str]:
         return [

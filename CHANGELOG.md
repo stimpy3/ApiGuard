@@ -3,6 +3,41 @@
 Semver tags mean nothing to a consumer without this file: someone pinning
 `:1` needs to know whether `1.1` is safe to pick up.
 
+## [Unreleased]
+
+- The LangGraph `classify_severity` node now uses `openai/gpt-oss-20b` by
+  default, set with the new `GROQ_CLASSIFY_MODEL` variable. A routine/risky label
+  does not need the large model. `GROQ_MODEL` (still `gpt-oss-120b`) now applies
+  only to `--explain`.
+- `api-guard review` runs the checks and then the approval workflow. A blocked
+  build pauses and saves its state to SQLite (`.api-guard/reviews.db`), and
+  `api-guard approve <id> --by <name>` resumes it from any later process. The
+  exit code of `review` is the same as `check`; approval records sign-off in
+  `review.md` and does not rewrite `result.json`.
+- `api-guard ask "<question>"`: Groq investigates past builds using the MCP
+  server's read-only tools, choosing which to call and iterating until it can
+  answer. Uses `openai/gpt-oss-20b` by default (`GROQ_AGENT_MODEL`). Adds
+  `langchain-mcp-adapters` to the `ai` extra, which requires `mcp<2`.
+- `ask` answers carry the model's confidence and reason, a caution label, and
+  computed warnings: identifiers not found in the tool output, tool errors, or
+  no build data read. The model is told to mark inference as inference.
+- `api-guard ui`: a Streamlit page for `ask`, in a new `ui` extra.
+- Fixed: a tool that found nothing (no expiring waivers) sent Groq an empty
+  tool message, which it rejects with a 400. Empty results now read
+  "(no results)".
+- Fixed: every MCP tool advertised its inputs as `args` and `kwargs` instead of
+  `build_id`, because the error-handling wrapper hid the real signature, so
+  calls from any MCP client failed validation.
+- `review` writes `approval-request.md` to the report directory only while a
+  review is paused, and removes a stale one otherwise, so CI can decide whether
+  to wait by checking for the file instead of parsing console output.
+- The approval question says "contract change(s)", not "breaking change(s)": it
+  counts every detected change, including those below the blocking threshold.
+- `--help` keeps the module docstring's line breaks.
+- Restart persistence is now tested with two separate processes sharing only
+  the SQLite file (`tests/test_review.py`). The earlier in-memory test only
+  proved pause and resume within one process.
+
 ## [1.0.0] — 2026-09-21
 
 First release.

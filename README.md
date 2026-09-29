@@ -96,6 +96,19 @@ acknowledgement becomes an auditable artifact, which is the entire point.
 
 Applied waivers are printed on every run, including passing ones.
 
+### Sign-off on a blocked build (AI extra)
+
+```bash
+api-guard review --id 42           # same checks and exit code as `check`
+api-guard approve 42 --by sohan    # later, from any process with the same state file
+```
+
+`review` pauses a blocked build and saves it to `.api-guard/reviews.db`, so
+nothing waits on a human. `approve` resumes it and writes
+`api-guard-report/review.md` naming the approver. It does not change the
+verdict in `result.json`; whether a signed-off failure may ship is up to your
+pipeline. In CI, keep the state file somewhere that outlives the workspace.
+
 ## Configuration
 
 ```yaml
@@ -121,6 +134,34 @@ report:
   dir: api-guard-report
   formats: [markdown, json, junit]
 ```
+
+## Asking about a build (AI extra)
+
+```bash
+api-guard ask "why did build 42 fail?"
+api-guard ask "did build 42 also fail conformance?" --job 'sample-api-local/job/demo%252Fbreaking-rename'
+```
+
+Groq (`GROQ_API_KEY`) answers using this project's MCP server as its tools: it
+decides which of the six read-only tools to call, reads the results, and calls
+more until it can answer. It prints the tools it used before the answer. The
+tools read Jenkins' archived `result.json` (`JENKINS_URL`, `JENKINS_JOB`), and
+`local` reads the report in the current directory. Nothing it does can change a
+verdict: there are no write tools, the loop is capped at 8 rounds, and it runs
+only when asked.
+
+Each answer ends with the model's own confidence (high / medium / low, with a
+reason) and a caution label. The rating is not calibrated, so it is shown next
+to checks api-guard runs itself: any fingerprint or rule id in the answer that
+never appeared in the tool output is flagged as possibly made up, as are
+answers given without reading any build data.
+
+`api-guard ui` opens the same thing as a web page (`pip install 'api-guard[ai,ui]'`),
+showing each tool call as it happens.
+
+On Groq's free tier (8000 tokens a minute) several questions in a row can hit
+the rate limit, since each tool call resends the conversation. It retries
+automatically; if that is not enough, wait a minute.
 
 `result.json` is the machine-readable interface — PR comments, dashboards and
 the MCP server all read it rather than scraping console output. It carries a

@@ -123,9 +123,9 @@ def test_verdict_is_identical_without_the_llm_node(monkeypatch) -> None:
 def test_blocked_build_pauses_for_approval(monkeypatch) -> None:
     """A blocked build suspends rather than rendering a verdict nobody signed.
 
-    The pause is the point of using a graph: with a checkpointer the state
-    survives, so approval can arrive hours later from another process. A plain
-    script would have to block a build agent for that whole time.
+    This covers the pause and resume logic within one process, using the
+    in-memory saver. Surviving a process restart is a separate claim, proved
+    with a real SQLite file in test_review.py.
     """
     from langgraph.checkpoint.memory import MemorySaver
 
@@ -138,8 +138,7 @@ def test_blocked_build_pauses_for_approval(monkeypatch) -> None:
     assert "__interrupt__" in result, "a blocked build should wait for a human"
     assert "report" not in result, "nothing should be rendered before approval"
 
-    # The state persisted: resuming is a separate call, and the graph picks up
-    # exactly where it stopped.
+    # Resuming is a separate call, and the graph picks up where it stopped.
     from langgraph.types import Command
 
     resumed = compiled.invoke(Command(resume={"approved_by": "sohan"}), config=config)

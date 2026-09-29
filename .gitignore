@@ -7,4 +7,5 @@ venv/
 build/
 dist/
 api-guard-report/
+.api-guard/
 .env
