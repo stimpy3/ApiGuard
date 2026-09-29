@@ -46,10 +46,29 @@ def test_empty_file_is_fine(tmp_path: Path) -> None:
     assert load_waivers(write(tmp_path, ""), today=TODAY) == []
 
 
-def test_expired_waiver_is_rejected(tmp_path: Path) -> None:
-    expired = VALID.replace(FUTURE, PAST)
-    with pytest.raises(PolicyError, match="expired"):
-        load_waivers(write(tmp_path, expired), today=TODAY)
+def test_expired_waiver_loads_but_is_never_applied(tmp_path: Path) -> None:
+    """Expired is a warning, not a failure: the waiver is set aside, so the
+    change it used to cover counts exactly as if it did not exist."""
+    expired = load_waivers(write(tmp_path, VALID.replace(FUTURE, PAST)), today=TODAY)
+    assert len(expired) == 1
+
+    remaining, outcome = apply_waivers([change("631dbccdc316")], expired, today=TODAY)
+    assert len(remaining) == 1, "an expired waiver must not let the change through"
+    assert outcome.applied == []
+    assert [w.fingerprint for w in outcome.expired] == ["631dbccdc316"]
+    assert outcome.stale == [], "expired is reported as expired, not as stale"
+
+
+def test_waiver_beyond_max_days_is_rejected(tmp_path: Path) -> None:
+    """A far-off expiry would turn a waiver back into a permanent ignore list."""
+    far = VALID.replace(FUTURE, (TODAY + timedelta(days=91)).isoformat())
+    with pytest.raises(PolicyError, match="more than 90 days"):
+        load_waivers(write(tmp_path, far), today=TODAY)
+
+
+def test_max_days_is_configurable(tmp_path: Path) -> None:
+    far = VALID.replace(FUTURE, (TODAY + timedelta(days=150)).isoformat())
+    assert len(load_waivers(write(tmp_path, far), today=TODAY, max_days=180)) == 1
 
 
 def test_waiver_expiring_today_still_works(tmp_path: Path) -> None:

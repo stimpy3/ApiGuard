@@ -32,11 +32,11 @@ def _settings() -> tuple[str, str]:
     """On the page, not in the sidebar: Streamlit hides the sidebar on narrow
     screens, and the job setting decides which builds exist at all, so a
     hidden one makes "build 1 not found" look like a bug."""
-    from api_guard.ai.explain import _api_key
+    from api_guard.ai import llm
 
     st.session_state.setdefault("job", os.environ.get("JENKINS_JOB", "sample-api"))
     st.session_state.setdefault("url", os.environ.get("JENKINS_URL", "http://localhost:8081"))
-    has_key = bool(_api_key())
+    has_key = bool(llm.api_key())
 
     label = f"Looking at `{st.session_state.job}`" + ("" if has_key else " · no Groq key")
     with st.expander(label, expanded=not has_key):
@@ -46,7 +46,7 @@ def _settings() -> tuple[str, str]:
             key="job",
             help="For a multibranch job: sample-api-local/job/demo%252Fbreaking-rename",
         )
-        st.caption(f"Model: `{os.environ.get('GROQ_AGENT_MODEL', agent.DEFAULT_MODEL)}`")
+        st.caption(f"Model: `{llm.model_name('agent')}`")
         if not has_key:
             st.error("No GROQ_API_KEY in the environment or .env.")
     return st.session_state.url, st.session_state.job

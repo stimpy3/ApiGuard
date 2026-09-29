@@ -71,6 +71,6 @@ def test_typed_question_is_asked(asked) -> None:
 
 def test_missing_key_is_shown(monkeypatch) -> None:
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
-    monkeypatch.setattr("api_guard.ai.explain._api_key", lambda: None)
+    monkeypatch.setattr("api_guard.ai.llm.api_key", lambda: None)
     app = AppTest.from_file(PAGE, default_timeout=30).run()
     assert any("GROQ_API_KEY" in e.value for e in app.error)

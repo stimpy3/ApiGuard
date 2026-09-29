@@ -157,7 +157,8 @@ hundreds of built-in rules.
 How api-guard uses it:
 
 1. Read the **old** spec from git: `git show origin/main:openapi.yaml`. Nothing
-   gets checked out. `spec.base` can also be a file path or a URL.
+   gets checked out. `spec.base` can also be a file path or a URL, and
+   `--base` overrides it for one run.
 2. Take the **new** spec from your working tree.
 3. Run `oasdiff breaking old new --format json`.
 4. Remove any changes covered by a **waiver** (section 5).
@@ -216,7 +217,7 @@ flowchart TD
 |---|---|---|
 | `0` | Contract intact, or every break waived | Additive change, sunset kept |
 | `1` | Would break consumers | Unwaived breaking change, stale spec, server drift |
-| `2` | api-guard couldn't reach a conclusion | Bad config, oasdiff missing, API unreachable, expired waiver |
+| `2` | api-guard couldn't reach a conclusion | Bad config, oasdiff missing, API unreachable, a waiver set too far ahead |
 
 **Why 1 and 2 are kept apart:** a typo in a URL reported as "breaking change
 detected" sends people hunting for a change that doesn't exist, and after that
@@ -337,7 +338,7 @@ flowchart TD
     W --> R{"Teammates review<br/>the pull request"}
     R -->|"someone objects"| N["Not merged"]
     R -->|"approved"| M["Fingerprint matches the waiver<br/>PASS, 1 waived, merge and ship"]
-    M --> E["Expiry date passes:<br/>the run fails until the old line is removed"]
+    M --> E["Expiry date passes:<br/>waiver ignored, report warns<br/>until the old line is removed"]
 ```
 
 #### Who reads each field
@@ -347,7 +348,7 @@ The file has two readers: the machine and people.
 | Field | Read by | Used for |
 |---|---|---|
 | `fingerprint` | **api-guard** | Which break to let through. The matching key |
-| `expires` | **api-guard** | After this date the waiver is refused and the run fails (exit 2) |
+| `expires` | **api-guard** | After this date the waiver is ignored (the change counts again) and every report warns until the line is removed. At most `max_waiver_days` ahead |
 | `reason` | **people** | Why it's OK. api-guard only checks it's a real sentence (at least 10 characters, so "temp fix" is rejected), never whether it's true |
 | `approved_by` | **people** | Who takes responsibility. api-guard only checks it isn't empty |
 | `id`, `path` | **people** | Optional. Helps a reader see what the fingerprint refers to |
@@ -387,7 +388,7 @@ that change any more. Her waiver sits in the file, unused. Now:
 
 | Without expiry | With expiry (2026-12-31) |
 |---|---|
-| api-guard finds Priya's 2026 waiver, matches it, and **silently lets the break through**. Her reason was about 2026's apps. The 2027 partner integration breaks, and nobody was warned | The waiver died in January 2027, and the run failed until someone removed the stale line. In 2028 the removal is **blocked**, and a person has to look at it fresh |
+| api-guard finds Priya's 2026 waiver, matches it, and **silently lets the break through**. Her reason was about 2026's apps. The 2027 partner integration breaks, and nobody was warned | The waiver stopped working in January 2027, and every report warned "remove this expired waiver". In 2028 the removal is **blocked**, and a person has to look at it fresh |
 
 A waiver is permission for **a situation at a point in time**. Its reason
 ("these apps are migrated") is only true then. The expiry stops an old
@@ -396,7 +397,8 @@ permanent key.
 
 #### Choosing the expiry date
 
-A person chooses it; api-guard sets no maximum. **Set it to the date the reason
+A person chooses it, up to `policy.max_waiver_days` ahead (default **90**; a
+waiver set further out is refused, exit 2). **Set it to the date the reason
 stops being true, or the date you've promised to finish.**
 
 | Situation | Good expiry |
@@ -415,7 +417,12 @@ expires and gets cleaned out, and can't be reused by accident later.
 
 - **Stale waivers** (matching nothing any more, usually because the problem was
   fixed properly or the change is already on `main`) are listed in the report
-  but don't fail the build. Only expiry does.
+  but don't fail the build.
+- **Expired waivers** are never applied and are listed under "Expired waivers -
+  remove them" in every report. They don't fail the build by themselves: a dead
+  line in a file is paperwork, not a broken API.
+- **A waiver set more than `max_waiver_days` ahead** is refused (exit 2), so a
+  waiver can't quietly become permanent.
 - **Duplicate fingerprints** in the file are rejected (exit 2).
 - **Why not an "ignore list"?** An ignore list lives forever and keeps silently
   hiding every future break on the same field. Waivers are the same idea, but
@@ -455,6 +462,7 @@ policy:
   deprecation_days_beta: 30
   severity_levels: null         # optional oasdiff rule-tuning file
   waivers: waivers.yaml
+  max_waiver_days: 90           # a waiver may expire at most this far ahead
 
 report:
   dir: api-guard-report
@@ -507,10 +515,30 @@ The AI layer is an optional install (`pip install ".[ai]"`) and runs on a
 | **MCP server** | started by `ask` | Serves build results as read-only tools | none, no AI |
 | **Web page** | `ui` | `ask` in a browser | same as `ask` |
 
+### One shared model layer (`llm.py`)
+
+Every model call goes through `src/api_guard/ai/llm.py`. It holds:
+
+- **A model per job** (triage, explain, agent), each with its own setting.
+- **The key**, loaded once (environment, or `.env` for local use).
+- **The rate-limit fallback.** If a model is still rate-limited after retries,
+  the call is tried once on the other Groq model: same free key, but Groq's
+  limits are per model. If both are limited, the report shows the rule-based
+  facts without AI text.
+- **One copy of the project's rules** (sunsets, field demotion needs a waiver,
+  the exact waiver keys), used by every prompt. Before, three hand-kept copies
+  had drifted apart.
+- **The prompt-shrinking helpers** described in section 12.
+
+`AI_PROVIDER` selects the provider; `groq` is the only one implemented.
+Everything above it (prompts, agent loop, MCP tools) works through LangChain's
+standard chat-model interface, so adding another free provider is a change in
+this one file.
+
 ### What the model sees, and what it doesn't
 
 The model **never sees your spec file or your code**. It gets the short list of
-changes oasdiff already found (at most 8, worst first) and is asked to
+changes oasdiff already found (repeats merged, at most 8, worst first) and is asked to
 **explain** them, not to work out what broke. The facts come from the rules.
 The model adds plain English.
 
@@ -520,8 +548,11 @@ Other safeguards:
   `migration`, `band`), validated with Pydantic. If explain's structured answer
   fails, it falls back to plain text rather than nothing.
 - **The project's rules are in the prompt** (use `deprecated: true`, not
-  `x-deprecated`; demoting a field needs a waiver), so the model doesn't guess
-  them.
+  `x-deprecated`; demoting a field needs a waiver), from the one shared copy
+  in `llm.py`, so the model doesn't guess them.
+- **JSON-schema mode for structured answers.** The gpt-oss models mangle tool
+  names in tool-calling mode, so `llm.py` picks the mode each model handles
+  reliably.
 - **Fingerprints are never written by the model.** The draft waiver in the
   report uses the real ones, since a made-up fingerprint would silently match
   nothing.
@@ -704,12 +735,15 @@ of the agent separate, so each can change without touching the others:
 | Guard | Stops |
 |---|---|
 | **Max 8 rounds** of tool calls | Endless looping |
+| **Max 12 tool calls in total** | One round asking for many tools at once |
+| **Repeat detection**: the same tool with the same inputs isn't run again; the model is told it already has the result | Wasted calls and tokens from a model going in circles |
+| **Conversation budget** (~6000 tokens): older tool results are shortened before the next model call, the newest kept whole | Outgrowing the free tier's per-minute limit on long investigations |
 | **Read-only tools only** | Harm from a tricked model: pull request text can contain "ignore your instructions", but there is nothing it could make the agent change |
 | **Tool output treated as data**, as the prompt tells the model | Prompt injection steering the answer |
 | **Each tool result capped at 4000 characters** | Huge inputs that slow the model and burn tokens |
 | **Empty results sent as "(no results)"** | Groq rejects empty tool messages |
 | **Tool errors passed back to the model** | Crashes on a bad build ID |
-| **Up to 4 retries on rate limits**, waiting as long as Groq says | Groq's free tier limits (HTTP 429) |
+| **Up to 4 retries on rate limits**, waiting as long as Groq says, then that one call moves to the other Groq model | Groq's free tier limits (HTTP 429) |
 | **Never part of the gate** | An AI failure affecting a build |
 
 ### Honest answers
@@ -743,11 +777,15 @@ only partly follow this, which is why the checks above exist.
 | Schemathesis run time | 900 s | conformance check |
 | Generated requests per endpoint | 50 (`max_examples`) | config |
 | Conformance failures listed in the report | 10 distinct problems | conformance check |
-| Changes sent to the model | 8, worst first | explain, triage |
+| Changes sent to the model | 8, repeats merged, worst first | explain, triage |
+| Prompt size | ~1500 tokens (triage), ~2500 (explain) | trimmed before sending |
 | Model call timeout | 45 s | all AI calls |
-| Retries: explain / triage | 1 | then skipped quietly |
-| Retries: agent | 4, honouring Groq's retry-after | then a clear "rate limit" message |
+| Retries: explain / triage | 1, then the other Groq model once | then skipped quietly (facts only) |
+| Retries: agent | 4, honouring Groq's retry-after, then the other Groq model for that call | then a clear "rate limit" message |
 | Agent tool rounds | 8 | then "stopped without an answer" |
+| Agent tool calls in total | 12 | then told to answer with what it has |
+| Agent conversation size | ~6000 tokens | older tool results shortened |
+| Waiver expiry | `max_waiver_days`, default 90 | further out is refused (exit 2) |
 | Characters per tool result | 4000 | agent |
 | Fetching from Jenkins (MCP) | 20 s | MCP server |
 | Jenkins: build and gate stage | 30 min | Jenkinsfile |
@@ -765,12 +803,23 @@ is built to stay small:
   no model call. No key means no call either.
 - **Facts, not files.** The model gets a pre-filtered list of changes, never
   the full spec (often hundreds of lines).
-- **At most 8 changes per prompt**, worst first.
+- **At most 8 changes per prompt**, worst first, with repeats merged: the same
+  rule on the same endpoint is sent once, with a count.
+- **Budget checked before sending.** Each prompt's size is estimated first and
+  trimmed to fit (about 1500 tokens for triage, 2500 for explain), instead of
+  finding out from a rate-limit error.
+- **Fingerprints stay out of prompts.** The model never needs them, so they
+  aren't paid for.
 - **The small model where it's enough.** Triage and the agent use
   `gpt-oss-20b`; only the written explanation uses `gpt-oss-120b`. Each role
   has its own setting.
 - **Tool results capped** at 4000 characters, because every agent round
-  resends the whole conversation.
+  resends the whole conversation, and **older results shortened** once the
+  conversation passes about 6000 tokens.
+- **No repeated tool calls.** The agent is told it already has a result instead
+  of fetching it again.
+- **A second model, not a second provider.** On a rate limit, the other Groq
+  model on the same key takes the call. No other sign-up needed.
 - **Few retries** for one-shot calls (1), so a failing provider isn't hammered.
 - **Everything optional.** A team that doesn't want AI never installs it.
 
@@ -913,6 +962,14 @@ flowchart TD
 
 Things worth knowing:
 
+- **Builds of `main` compare against what's deployed.** On a branch, the
+  breaking check compares with `origin/main`. On `main` itself that would be the
+  same commit, so the check could never find anything. The pipeline passes
+  `--base` with the last commit that passed on this job
+  (`GIT_PREVIOUS_SUCCESSFUL_COMMIT`), or the previous commit on a first build.
+  Approved builds end UNSTABLE, not SUCCESS, so they're never used as the base:
+  an approved break keeps being reported on `main` until its waiver is
+  committed.
 - **The pause survives a Jenkins restart.** Jenkins resumes the waiting build,
   and api-guard's saved review is in the workspace.
 - **Reports are archived** on every build, pass or fail. The MCP server (and so
@@ -1009,6 +1066,7 @@ Or skip installing entirely and use Docker (section 13).
 | `--generated-spec` | `api-guard check --generated-spec generated.yaml` | Your pipeline already exported the spec |
 | `--only` | `api-guard check --only breaking` | Run only some of `freshness`, `breaking`, `conformance` |
 | `--url` | `api-guard check --only conformance --url http://localhost:8080` | Test a different running API, e.g. staging after deploy |
+| `--base` | `api-guard check --base git:a1b2c3d` | Compare against a different spec than `spec.base`, e.g. the last deployed commit when building `main` |
 
 ### AI features (need `GROQ_API_KEY`)
 
@@ -1034,6 +1092,25 @@ Or skip installing entirely and use Docker (section 13).
 python -m api_guard.ai.mcp_server      # ask starts this by itself
 ```
 
+### Running the tests
+
+The most reliable way is inside the image, which has the real oasdiff, so
+nothing is skipped (the same as CI):
+
+```bash
+docker build --build-arg EXTRAS=cli,ai -t api-guard:local-ai .
+docker build -t api-guard:pytest - <<'EOF'
+FROM api-guard:local-ai
+RUN pip install --no-cache-dir pytest "streamlit>=1.40"
+WORKDIR /src
+ENTRYPOINT ["python", "-m", "pytest"]
+EOF
+docker run --rm -v "$PWD:/src" -e PYTHONPATH=/src/src api-guard:pytest -q -p no:cacheprovider
+```
+
+Tests never call a real model: `tests/conftest.py` sets `AI_PROVIDER=off`, even
+when a real key sits in `.env`.
+
 ---
 
 ## 18. Settings
@@ -1043,6 +1120,7 @@ Set as environment variables, or in a `.env` file (never committed).
 | Variable | Default | Used by |
 |---|---|---|
 | `GROQ_API_KEY` | none | every AI feature |
+| `AI_PROVIDER` | `groq` | which provider `llm.py` uses; `groq` is the only one implemented, anything else turns AI off |
 | `GROQ_MODEL` | `openai/gpt-oss-120b` | `--explain` |
 | `GROQ_CLASSIFY_MODEL` | `openai/gpt-oss-20b` | triage in `review` |
 | `GROQ_AGENT_MODEL` | `openai/gpt-oss-20b` | `ask`, `ui` |
@@ -1072,6 +1150,7 @@ api-guard/
 │   ├── verdict.py          combining checks into one verdict   ← no AI allowed
 │   ├── report.py           report.md / result.json / junit.xml
 │   └── ai/                 everything optional
+│       ├── llm.py          every model call: roles, key, fallback, shared rules
 │       ├── explain.py      --explain
 │       ├── graph.py        the LangGraph review workflow
 │       ├── review.py       review / approve, SQLite state
@@ -1097,9 +1176,8 @@ Stated plainly, so nobody discovers them the hard way:
   and the review workflow are separate paths.
 - **Approval doesn't create a waiver**, so the same break blocks again on the
   next build.
-- **The model is tied to Groq** through the settings above. Switching to
-  another free provider (or a local one like Ollama) means a small code change,
-  not just a setting.
+- **Only Groq is implemented** as a provider. `llm.py` is the single place
+  another free provider would be added.
 - **The shared Jenkins library** (`jenkins/vars/apiGuard.groovy`) runs `check`
   only, without approval.
 - **The breaking check needs oasdiff**, which the Docker image has. Locally

@@ -5,6 +5,38 @@ Semver tags mean nothing to a consumer without this file: someone pinning
 
 ## [Unreleased]
 
+### Shared model layer and a sturdier agent
+
+- New `ai/llm.py`: every model call goes through it. A model per job
+  (triage, explain, agent), the key loaded once, one copy of the project's
+  rules for every prompt (three copies had drifted), and JSON-schema mode for
+  the gpt-oss models.
+- Rate limits: after the client's retries, a call is tried once on the other
+  Groq model (same free key, separate per-model limit), then falls back to the
+  rule-based facts.
+- Smaller prompts: repeated changes merged, at most 8 sent, fingerprints left
+  out, and each prompt trimmed to a token budget before sending.
+- Agent loop: at most 12 tool calls in total (not just 8 rounds), a repeated
+  call with the same inputs is not run again, and older tool results are
+  shortened once the conversation passes ~6000 tokens.
+- `AI_PROVIDER` setting (only `groq` implemented; anything else turns AI off).
+  Tests set it to `off`, so a real key in `.env` is never spent by a test run.
+
+### Waivers
+
+- Expired waivers are **ignored with a warning** instead of failing the build.
+  The change they covered counts again, and every report lists them under
+  "Expired waivers - remove them". `result.json` gains `waivers.expired`
+  (schema 1.1).
+- New `policy.max_waiver_days` (default 90): a waiver expiring further ahead
+  is refused (exit 2), so waivers can't quietly become permanent.
+
+### Other
+
+- `--base` overrides `spec.base` for one run. The sample Jenkinsfile uses it on
+  `main`, where `origin/main` is the build's own commit and the breaking check
+  could never find anything; it now compares with the last successful commit.
+
 - The LangGraph `classify_severity` node now uses `openai/gpt-oss-20b` by
   default, set with the new `GROQ_CLASSIFY_MODEL` variable. A routine/risky label
   does not need the large model. `GROQ_MODEL` (still `gpt-oss-120b`) now applies

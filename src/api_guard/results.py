@@ -16,7 +16,8 @@ from api_guard.config import Severity
 
 # Bump the minor for additive changes, the major for anything a consumer could
 # trip over. A tool that enforces API contracts should keep its own.
-SCHEMA_VERSION = "1.0"
+# 1.1: waivers.expired added.
+SCHEMA_VERSION = "1.1"
 
 
 class Status(StrEnum):

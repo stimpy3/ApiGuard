@@ -78,6 +78,16 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     common.add_argument(
+        "--base",
+        default=None,
+        help=(
+            "Override spec.base: what to compare against (git:<ref>, a file or a "
+            "URL). On a build of main itself, origin/main is this commit, so the "
+            "breaking check would compare the spec with itself; pass the last "
+            "deployed commit instead, e.g. --base git:<previous-commit>."
+        ),
+    )
+    common.add_argument(
         "--explain",
         action="store_true",
         help=(
@@ -172,6 +182,7 @@ def main(argv: list[str] | None = None) -> int:
             args.config,
             generated_spec=args.generated_spec,
             url=args.url,
+            base=args.base,
             only=selected,
             explain=args.explain,
             review=(args.state, args.review_id) if args.command == "review" else None,
@@ -196,6 +207,7 @@ def _run_check(
     *,
     generated_spec: Path | None,
     url: str | None,
+    base: str | None = None,
     only: set[str] | None,
     explain: bool,
     review: tuple[Path | None, str | None] | None = None,
@@ -205,6 +217,9 @@ def _run_check(
     except ConfigError as exc:
         print(f"api-guard: {exc}", file=sys.stderr)
         return EXIT_TOOL_ERROR
+
+    if base is not None:
+        config.spec.base = base
 
     if url is not None:
         if config.runtime is None:
@@ -256,7 +271,7 @@ def _load_waivers(config: Config) -> list[Waiver]:
         # An absent waivers file is the normal state for a healthy project, not
         # a misconfiguration.
         return []
-    return load_waivers(path)
+    return load_waivers(path, max_days=config.policy.max_waiver_days)
 
 
 def _check(
@@ -529,6 +544,11 @@ def _print_summary(result: RunResult, written: dict[str, Path]) -> None:
         print(f"\n  {len(result.waivers.stale)} stale waiver(s) matched nothing:")
         for waiver in result.waivers.stale:
             print(f"    - {waiver.describe()}")
+
+    if result.waivers.expired:
+        print(f"\n  WARNING: {len(result.waivers.expired)} expired waiver(s) were ignored. Remove them:")
+        for waiver in result.waivers.expired:
+            print(f"    - {waiver.describe()} (expired {waiver.expires.isoformat()})")
 
     for check in result.checks:
         if check.detail and check.status.is_blocking:

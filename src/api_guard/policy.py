@@ -16,21 +16,31 @@ tests/fixtures/specs/README.md). So api-guard asks oasdiff for JSON with no
 ignore file and does the filtering here, where it can also report what it did.
 
 **Waivers expire.** An ignore file accumulates forever and silently swallows
-future breakages on the same endpoint. An expired waiver fails the build,
-forcing somebody to re-justify it or delete it.
+future breakages on the same endpoint. An expired waiver is never applied, so
+an old permission cannot approve a new situation, and every report warns about
+it until somebody removes the line. It does not fail the build by itself: a
+dead line in a file is paperwork, not a broken API, and turning builds red over
+it teaches people to ignore red builds.
+
+**Waivers are short.** `policy.max_waiver_days` (default 90) caps how far ahead
+an expiry may be set, so "expires: 2099-01-01" cannot quietly turn a waiver
+back into a permanent ignore list.
 """
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
+DEFAULT_MAX_WAIVER_DAYS = 90
+
+
 class PolicyError(Exception):
-    """A waiver file that is missing, malformed, or contains an expired entry.
+    """A waiver file that is missing, malformed, or sets an expiry too far ahead.
 
     Reported as exit code 2 (tool/policy error) rather than 1 (contract
     violation): the API may be perfectly fine, it is the paperwork that is
@@ -77,17 +87,26 @@ class WaiverOutcome(BaseModel):
 
     applied: list[Waiver] = Field(default_factory=list)
     stale: list[Waiver] = Field(default_factory=list)
+    # Past their date: never applied, reported so somebody removes them.
+    expired: list[Waiver] = Field(default_factory=list)
 
     @property
     def any_applied(self) -> bool:
         return bool(self.applied)
 
 
-def load_waivers(path: Path, *, today: date | None = None) -> list[Waiver]:
+def load_waivers(
+    path: Path,
+    *,
+    today: date | None = None,
+    max_days: int | None = DEFAULT_MAX_WAIVER_DAYS,
+) -> list[Waiver]:
     """Read and validate a waivers file.
 
-    Raises PolicyError on anything wrong, including expiry: validation happens
-    once, here, so the checks downstream can assume every waiver is usable.
+    Raises PolicyError on anything malformed, or on an expiry more than
+    `max_days` ahead. Expired waivers are returned like any other:
+    apply_waivers is what refuses to use them, so the report can still name
+    them for removal.
     """
     today = today or date.today()
 
@@ -127,18 +146,20 @@ def load_waivers(path: Path, *, today: date | None = None) -> list[Waiver]:
     if problems:
         raise PolicyError(f"invalid waivers in {path}:\n" + "\n".join(problems))
 
-    expired = [w for w in waivers if w.is_expired(today)]
-    if expired:
-        listed = "\n".join(
-            f"  {w.describe()} — expired {w.expires.isoformat()}, approved by {w.approved_by}"
-            for w in expired
-        )
-        raise PolicyError(
-            f"{len(expired)} waiver(s) in {path} have expired:\n{listed}\n\n"
-            "A waiver is a decision with a shelf life. Either the change is still "
-            "acceptable — extend the date and say why — or it never was, and the "
-            "waiver should go."
-        )
+    if max_days is not None:
+        latest = today + timedelta(days=max_days)
+        too_long = [w for w in waivers if w.expires > latest]
+        if too_long:
+            listed = "\n".join(
+                f"  {w.describe()} — expires {w.expires.isoformat()}" for w in too_long
+            )
+            raise PolicyError(
+                f"{len(too_long)} waiver(s) in {path} expire more than {max_days} days "
+                f"from today (latest allowed: {latest.isoformat()}):\n{listed}\n\n"
+                "Set the date the reason stops being true, or when the migration "
+                "should be finished. A waiver that lasts for years is an ignore list. "
+                "Raise `policy.max_waiver_days` if your team really needs longer."
+            )
 
     seen: dict[str, int] = {}
     for w in waivers:
@@ -155,14 +176,23 @@ def load_waivers(path: Path, *, today: date | None = None) -> list[Waiver]:
 def apply_waivers(
     changes: list[dict],
     waivers: list[Waiver],
+    *,
+    today: date | None = None,
 ) -> tuple[list[dict], WaiverOutcome]:
     """Filter waived changes out of oasdiff's results.
 
     Returns the changes that still count, plus a record of which waivers were
-    used and which matched nothing. Stale waivers are reported but do not fail
-    the build: the usual reason a waiver stops matching is that somebody fixed
-    the underlying problem properly, and punishing that would be perverse.
+    used, which matched nothing, and which have expired. Stale waivers are
+    reported but do not fail the build: the usual reason a waiver stops
+    matching is that somebody fixed the underlying problem properly, and
+    punishing that would be perverse.
+
+    Expired waivers are set aside before matching, so a change carrying an
+    expired waiver's fingerprint counts exactly as if no waiver existed.
     """
+    today = today or date.today()
+    expired = [w for w in waivers if w.is_expired(today)]
+    waivers = [w for w in waivers if not w.is_expired(today)]
     waived_by_fingerprint = {w.fingerprint: w for w in waivers}
     matched: set[str] = set()
     remaining: list[dict] = []
@@ -177,5 +207,6 @@ def apply_waivers(
     outcome = WaiverOutcome(
         applied=[w for w in waivers if w.fingerprint in matched],
         stale=[w for w in waivers if w.fingerprint not in matched],
+        expired=expired,
     )
     return remaining, outcome

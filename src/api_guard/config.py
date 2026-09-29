@@ -147,6 +147,14 @@ class PolicyConfig(_Base):
         default=None,
         description="Optional waivers.yaml listing acknowledged breaking changes.",
     )
+    max_waiver_days: int = Field(
+        default=90,
+        ge=1,
+        description=(
+            "Furthest ahead a waiver's expiry may be, counted from today. Keeps "
+            "waivers short-lived instead of a permanent ignore list."
+        ),
+    )
 
 
 class ReportConfig(_Base):

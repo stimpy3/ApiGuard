@@ -18,21 +18,20 @@ changes while the verdict does not.
 
 from __future__ import annotations
 
-import os
 from typing import Annotated, Any, Literal, TypedDict
 
 from pydantic import BaseModel, Field
 
+from api_guard.ai import llm
 from api_guard.ai.evidence import Evidence
 
 # Advisory bands. Not severities — oasdiff already assigned those, and this is
 # a different question: how much human attention does it deserve?
 Band = Literal["routine", "risky", "unknown"]
 
-# A two-way label from a pre-parsed list is a small job, so it gets Groq's
-# smaller, faster model rather than the one explain.py uses for prose.
-# Separate variable so the two can be tuned independently.
-DEFAULT_CLASSIFY_MODEL = "openai/gpt-oss-20b"
+# A two-way label from a pre-parsed list is a small job: the "triage" role in
+# llm.py, which defaults to the smaller, faster model.
+_BUDGET = 1500  # input tokens for the triage prompt
 
 
 class Severity(BaseModel):
@@ -119,27 +118,13 @@ def _classify(state: State) -> State:
     if not changes:
         return {"band": "routine", "rationale": "No contract changes detected."}
 
-    key = os.environ.get("GROQ_API_KEY")
-    if not key:
+    if not llm.available():
         return {"band": "unknown", "rationale": "No model configured; not classified."}
 
     try:
-        from langchain_groq import ChatGroq
-
-        model = ChatGroq(
-            api_key=key,
-            model=os.environ.get("GROQ_CLASSIFY_MODEL", DEFAULT_CLASSIFY_MODEL),
-            temperature=0,
-            timeout=45,
-            max_retries=1,
-        )
-        listed = "\n".join(
-            f"- {c.get('id')}: {c.get('text')} ({c.get('operation')} {c.get('path')})"
-            for c in changes[:8]
-        )
-        # json_schema, not the default tool calling: gpt-oss-20b lowercases the
-        # tool name ("severity" for Severity) and Groq rejects the call.
-        answer = model.with_structured_output(Severity, method="json_schema").invoke(
+        compact, omitted = llm.compact_changes(changes)
+        listed = llm.fit(llm.format_changes(compact, omitted), _BUDGET)
+        prompt = (
             "Classify how much human attention these API contract changes need.\n\n"
             f"{listed}\n\n"
             "'routine' if a reviewer would wave this through — additive, or a "
@@ -147,6 +132,9 @@ def _classify(state: State) -> State:
             "break in a way the rules alone do not convey.\n\n"
             "This is advice for a human, not a decision. The build outcome is "
             "already settled."
+        )
+        answer = llm.with_fallback(
+            "triage", lambda model: llm.structured(model, Severity).invoke(prompt)
         )
         if isinstance(answer, Severity):
             return {"band": answer.band, "rationale": answer.rationale}

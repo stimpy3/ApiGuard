@@ -8,10 +8,12 @@ get_build_context, then get_spec_diff, then get_conformance_results because
 the diff alone did not explain a failure. That decide-act-observe loop is what
 makes this an agent rather than one prompt over result.json.
 
-**Why through MCP rather than calling the functions directly.** The tools are
-defined once, in mcp_server.py, and any MCP client can use them — Claude Code,
-an IDE, or this. The asker here is also not the pipeline: it runs later, from
-a terminal, against archived results, which is the case evidence.py describes.
+**Why through MCP rather than calling the functions directly.** It keeps the
+tools separate from the model. The tools are defined once, in mcp_server.py,
+and reach this agent through a standard protocol, so changing which free model
+runs the agent (llm.py) never touches the tools, and adding a tool needs no
+change here. The asker is also not the pipeline: it runs later, from a
+terminal, against archived results, which is the case evidence.py describes.
 
 **What bounds it.** The loop is short and the tools are harmless:
 
@@ -34,6 +36,8 @@ import re
 import sys
 from dataclasses import dataclass, field
 from typing import Any, Callable
+
+from api_guard.ai import llm
 
 SYSTEM = """You investigate api-guard CI results for a developer, using read-only tools.
 
@@ -60,26 +64,21 @@ Rules:
   high: everything you said is stated in tool output. medium: some of it is
   inference. low: mostly inference, tools failed, or data was missing.
 
-This project's rules for shipping a change without breaking consumers:
-- To retire an ENDPOINT: set `deprecated: true` (that exact key; there is no
-  `x-deprecated`) plus an `x-sunset` date, ship that, and delete it after the
-  date. No waiver needed.
-- A RESPONSE FIELD has no sunset. Add the replacement field first. Demoting the
-  old field from required to optional IS the breaking step and needs a waiver;
-  once it is optional, deleting it is free.
-- A waiver is an entry in waivers.yaml with exactly these keys: fingerprint,
-  id, path, reason, approved_by, expires. The fingerprint comes from the
-  report; never make one up."""
+""" + llm.POLICY_RULES
 
 MAX_TOOL_ROUNDS = 8
+# A round can request several tools at once; this bounds the total.
+MAX_TOOL_CALLS = 12
 # ~1000 tokens. Every round resends the whole conversation, and Groq's free
 # tier allows 8000 tokens a minute, so each tool result has to stay small.
 TOOL_OUTPUT_CAP = 4000
-# The small model. Tried against the same four questions as gpt-oss-120b on a
-# real build: same tool choices, correct answers, and it asked for a build id
-# rather than guessing. The name-mangling seen with 20b in graph.py was a
-# structured-output tool named "Severity"; these tools are already lowercase.
-DEFAULT_MODEL = "openai/gpt-oss-20b"
+# Whole-conversation budget, in tokens. Past it, older tool results are
+# shortened before the next model call.
+CONVERSATION_BUDGET = 6000
+# The small model ("agent" role in llm.py). Tried against the same four
+# questions as gpt-oss-120b on a real build: same tool choices, correct
+# answers, and it asked for a build id rather than guessing.
+DEFAULT_MODEL = llm.SMALL
 
 
 class AskError(Exception):
@@ -105,28 +104,144 @@ class Answer:
     )
 
 
-def build_agent(model: Any, tools: list):
+def build_agent(
+    model: Any, tools: list, *, max_calls: int = MAX_TOOL_CALLS, fallback: Any | None = None
+):
     """The loop: the model either calls tools or answers; tool results go back to it.
 
     Kept separate from the MCP plumbing so tests can drive it with a scripted
     model and plain tools, without a network or a key.
+
+    The tools step is written out rather than using LangGraph's ToolNode, for
+    two guards small free models need:
+
+    - **A cap on total calls.** A round can request several tools at once, so
+      the round limit alone does not bound the calls. Past `max_calls`, the
+      model is told the budget is spent and to answer with what it has.
+    - **Repeat detection.** The same tool with the same arguments is not run
+      again; the model is told it already has that result. Calls are read-only,
+      so repeating one can only waste time and tokens.
     """
+    import json
+
+    from langchain_core.messages import AIMessage, ToolMessage
     from langgraph.graph import END, START, MessagesState, StateGraph
-    from langgraph.prebuilt import ToolNode, tools_condition
+    from langgraph.prebuilt import tools_condition
 
     bound = model.bind_tools(tools)
+    if fallback is not None:
+        # Per call: a rate limit mid-investigation moves that one call to the
+        # other Groq model instead of losing the whole answer.
+        bound = bound.with_fallbacks(
+            [fallback.bind_tools(tools)], exceptions_to_handle=_rate_limit_errors()
+        )
+    by_name = {t.name: t for t in tools}
 
     def think(state: MessagesState) -> dict:
-        return {"messages": [bound.invoke(state["messages"])]}
+        return {"messages": [bound.invoke(_within_budget(state["messages"]))]}
+
+    def key(call: dict) -> str:
+        return f"{call.get('name')}:{json.dumps(call.get('args', {}), sort_keys=True, default=str)}"
+
+    async def act(state: MessagesState) -> dict:
+        messages = state["messages"]
+        executed = {m.tool_call_id for m in messages if isinstance(m, ToolMessage) and not _skipped(m)}
+        seen: set[str] = set()
+        for m in messages[:-1]:
+            for call in getattr(m, "tool_calls", None) or []:
+                if call.get("id") in executed:
+                    seen.add(key(call))
+
+        last = messages[-1]
+        replies = []
+        for call in last.tool_calls if isinstance(last, AIMessage) else []:
+            note = None
+            if key(call) in seen:
+                note = (
+                    f"You already called {call['name']} with these arguments; "
+                    "that result is earlier in this conversation. Use it."
+                )
+            elif len(executed) >= max_calls:
+                note = (
+                    f"Tool budget used up ({max_calls} calls). Answer now with "
+                    "what you have, and say what you could not check."
+                )
+            if note:
+                replies.append(ToolMessage(
+                    content=note, tool_call_id=call["id"], name=call["name"],
+                    additional_kwargs={"api_guard": "skipped"},
+                ))
+                continue
+
+            tool = by_name.get(call["name"])
+            try:
+                if tool is None:
+                    raise ValueError(
+                        f"{call['name']} is not a valid tool. Available: {', '.join(sorted(by_name))}"
+                    )
+                result = await tool.ainvoke(call)
+                reply = result if isinstance(result, ToolMessage) else ToolMessage(
+                    content=str(result), tool_call_id=call["id"], name=call["name"]
+                )
+            except Exception as exc:  # noqa: BLE001 - shown to the model, not raised
+                reply = ToolMessage(
+                    content=f"Error: {exc}", tool_call_id=call["id"],
+                    name=call["name"], status="error",
+                )
+            replies.append(reply)
+            executed.add(call["id"])
+            seen.add(key(call))
+        return {"messages": replies}
 
     graph = StateGraph(MessagesState)
     graph.add_node("model", think)
-    graph.add_node("tools", ToolNode(tools, handle_tool_errors=True))
+    graph.add_node("tools", act)
     graph.add_edge(START, "model")
     # tools_condition: tool calls in the last message -> "tools", otherwise END.
     graph.add_conditional_edges("model", tools_condition, {"tools": "tools", END: END})
     graph.add_edge("tools", "model")
     return graph.compile()
+
+
+def _rate_limit_errors() -> tuple[type[BaseException], ...]:
+    try:
+        from groq import RateLimitError
+
+        return (RateLimitError,)
+    except ImportError:
+        return (Exception,)
+
+
+def _skipped(message: Any) -> bool:
+    return (getattr(message, "additional_kwargs", None) or {}).get("api_guard") == "skipped"
+
+
+def _within_budget(messages: list) -> list:
+    """Shrink the oldest tool results until the conversation fits the budget.
+
+    Every round resends the whole conversation, so without this a long
+    investigation would outgrow the free tier's per-minute limit. The newest
+    results are kept whole: they are the ones the model is working from.
+    """
+    from langchain_core.messages import ToolMessage
+
+    def size(ms: list) -> int:
+        return sum(llm.estimate_tokens(str(m.content)) for m in ms)
+
+    if size(messages) <= CONVERSATION_BUDGET:
+        return messages
+    trimmed = list(messages)
+    tool_positions = [i for i, m in enumerate(trimmed) if isinstance(m, ToolMessage)]
+    for i in tool_positions[:-1]:  # never the newest result
+        original = trimmed[i]
+        text = str(original.content)
+        if len(text) > 400:
+            trimmed[i] = original.model_copy(update={
+                "content": text[:400] + "\n... [older result shortened to save tokens]"
+            })
+        if size(trimmed) <= CONVERSATION_BUDGET:
+            break
+    return trimmed
 
 
 async def run(
@@ -270,29 +385,20 @@ def _cap(tool: Any) -> Any:
     return tool.model_copy(update={"coroutine": capped})
 
 
-def _model():
-    from api_guard.ai.explain import _api_key
+def _models() -> tuple[Any, Any | None]:
+    """The agent's model and its rate-limit fallback, from llm.py.
 
-    key = _api_key()
-    if not key:
+    GROQ_AGENT_MODEL picks the model; the fallback is the other Groq model on
+    the same key, used for any single call that is still rate-limited after
+    the client's own retries.
+    """
+    if not llm.api_key():
         raise AskError("ask needs GROQ_API_KEY (environment or .env)")
-
-    from langchain_groq import ChatGroq
-
-    # Its own variable, so the agent and --explain (GROQ_MODEL, 120b) can be
-    # tuned separately. Set GROQ_AGENT_MODEL=openai/gpt-oss-120b if answers
-    # degrade on harder questions.
-    #
-    # More retries than explain.py: an agent makes several calls in a row and
-    # hits per-minute token limits in a way a single call does not. The Groq
-    # client honours the retry-after the 429 carries, usually a second or two.
-    return ChatGroq(
-        api_key=key,
-        model=os.environ.get("GROQ_AGENT_MODEL", DEFAULT_MODEL),
-        temperature=0,
-        timeout=45,
-        max_retries=4,
-    )
+    if not llm.available():
+        raise AskError(f"AI_PROVIDER={llm.provider()!r} is not supported; only 'groq' is")
+    name = llm.model_name("agent")
+    other = llm._other(name)
+    return llm.model_for("agent", name), (llm.model_for("agent", other) if other else None)
 
 
 async def _ask(
@@ -301,7 +407,7 @@ async def _ask(
     from langchain_mcp_adapters.client import MultiServerMCPClient
     from langchain_mcp_adapters.tools import load_mcp_tools
 
-    model = _model()
+    model, fallback = _models()
     client = MultiServerMCPClient(
         {
             "api-guard": {
@@ -315,7 +421,7 @@ async def _ask(
     # One server process for the whole conversation, rather than one per call.
     async with client.session("api-guard") as session:
         tools = [_cap(t) for t in await load_mcp_tools(session)]
-        return await run(build_agent(model, tools), question, on_step=on_step)
+        return await run(build_agent(model, tools, fallback=fallback), question, on_step=on_step)
 
 
 def ask(

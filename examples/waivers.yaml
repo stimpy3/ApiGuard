@@ -28,7 +28,9 @@
   reason: "PROD-142 - email superseded by phone. Web and mobile both confirmed migrated on 2026-09-15."
   approved_by: sohan
 
-  # After this date the build fails until somebody re-justifies or removes it.
-  # Waivers rot; an ignore list that lives forever silently swallows future
-  # breakages on the same endpoint, which is how a gate stops being one.
+  # After this date the waiver is ignored and every report warns until somebody
+  # removes it or renews it with a fresh reason. At most policy.max_waiver_days
+  # (default 90) ahead. Waivers rot; an ignore list that lives forever silently
+  # swallows future breakages on the same endpoint, which is how a gate stops
+  # being one.
   expires: 2026-12-31

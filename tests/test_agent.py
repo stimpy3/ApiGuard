@@ -93,6 +93,63 @@ def test_loop_stops_at_the_round_limit() -> None:
     assert len(calls) <= 3
 
 
+def test_repeated_call_is_not_run_again() -> None:
+    """Same tool, same arguments: the model is told it already has the result."""
+    answer, model = ask_with([
+        call("get_build_context", build_id="42"),
+        call("get_build_context", build_id="42"),
+        AIMessage(content="Build 42 failed.\nConfidence: high - stated in the report"),
+    ])
+    assert calls == ["context:42"], "the repeat must not reach the tool"
+    assert "already called get_build_context" in " ".join(str(m.content) for m in model.seen[-1])
+
+
+def test_total_tool_calls_are_capped() -> None:
+    """A round can ask for many tools at once; the cap bounds the total."""
+    many = AIMessage(content="", tool_calls=[
+        {"name": "get_build_context", "args": {"build_id": str(i)}, "id": f"c{i}"} for i in range(5)
+    ])
+    calls.clear()
+    model = ScriptedModel(messages=iter([many, AIMessage(content="Done.")]))
+    model.seen = []
+    compiled = agent.build_agent(model, [get_build_context], max_calls=3)
+    asyncio.run(agent.run(compiled, "q"))
+
+    assert len(calls) == 3
+    assert "Tool budget used up (3 calls)" in " ".join(str(m.content) for m in model.seen[-1])
+
+
+def test_rate_limited_call_moves_to_the_fallback_model(monkeypatch) -> None:
+    class Limited(Exception):
+        pass
+
+    class Failing(ScriptedModel):
+        def _generate(self, messages, *args, **kwargs):
+            raise Limited("429")
+
+    monkeypatch.setattr(agent, "_rate_limit_errors", lambda: (Limited,))
+    primary = Failing(messages=iter([]))
+    backup = ScriptedModel(messages=iter([AIMessage(content="Answered by the other model.")]))
+    backup.seen = []
+    compiled = agent.build_agent(primary, [get_build_context], fallback=backup)
+    answer = asyncio.run(agent.run(compiled, "q"))
+    assert answer.text == "Answered by the other model."
+
+
+def test_old_tool_results_shrink_when_the_conversation_is_too_big() -> None:
+    from langchain_core.messages import HumanMessage, ToolMessage
+
+    big = "x" * 30_000
+    messages = [
+        HumanMessage("q"),
+        ToolMessage(content=big, tool_call_id="1"),
+        ToolMessage(content=big, tool_call_id="2"),
+    ]
+    trimmed = agent._within_budget(messages)
+    assert len(str(trimmed[1].content)) < 1000, "the older result is shortened"
+    assert trimmed[2].content == big, "the newest result is kept whole"
+
+
 def test_tool_error_is_shown_to_the_model_not_raised() -> None:
     @tool
     def get_report(build_id: str) -> dict:
@@ -247,6 +304,6 @@ def test_steps_are_reported_live() -> None:
 
 def test_missing_key_is_a_plain_error(monkeypatch) -> None:
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
-    monkeypatch.setattr("api_guard.ai.explain._api_key", lambda: None)
+    monkeypatch.setattr("api_guard.ai.llm.api_key", lambda: None)
     with pytest.raises(agent.AskError, match="GROQ_API_KEY"):
         agent.ask("why did build 1 fail?")

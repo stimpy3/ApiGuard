@@ -130,7 +130,11 @@ def list_expiring_waivers(build_id: str, within_days: int = 30) -> list[dict]:
     waivers = report.get("waivers", {})
 
     expiring = []
-    for waiver in [*waivers.get("applied", []), *waivers.get("stale", [])]:
+    for waiver in [
+        *waivers.get("applied", []),
+        *waivers.get("stale", []),
+        *waivers.get("expired", []),  # already past: days_left is negative
+    ]:
         raw = waiver.get("expires")
         if not raw:
             continue

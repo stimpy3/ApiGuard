@@ -17,22 +17,21 @@ spec or to know the policy rules — those are computed here and handed over.
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
+from api_guard.ai import llm
 from api_guard.results import Status
 
 if TYPE_CHECKING:
     from api_guard.verdict import RunResult
 
-DEFAULT_MODEL = "openai/gpt-oss-120b"
-
 # Small models lose the thread on long lists, and a report nobody reads is
 # worth nothing anyway. The worst breakages are enough to act on.
 _MAX_CHANGES = 8
-_TIMEOUT = 45
+# Input budget for the prompt, in tokens: comfortably inside the free tier.
+_BUDGET = 2500
 
 
 class Explanation(BaseModel):
@@ -62,96 +61,66 @@ def explain(result: RunResult) -> str | None:
 def _explain(result: RunResult) -> str | None:
     if result.verdict is Status.PASSED and not result.changes:
         return None  # nothing to explain
-
-    api_key = _api_key()
-    if not api_key:
+    if not llm.available():
         return None
 
-    changes = sorted(
-        result.changes, key=lambda c: c.severity.rank, reverse=True
-    )[:_MAX_CHANGES]
+    changes = sorted(result.changes, key=lambda c: c.severity.rank, reverse=True)
     if not changes:
         return None
 
-    explanation = _ask(api_key, changes)
+    explanation = _ask(changes)
     if explanation is None:
         return None
 
-    return _render(explanation, changes)
+    return _render(explanation, changes[:_MAX_CHANGES])
 
 
-def _api_key() -> str | None:
-    """Read the key, loading .env if python-dotenv happens to be installed.
-
-    In CI the key arrives as a real environment variable from the secret store;
-    .env is a local-development convenience, not the mechanism.
-    """
-    key = os.environ.get("GROQ_API_KEY")
-    if key:
-        return key
-    try:
-        from dotenv import load_dotenv
-
-        load_dotenv()
-    except ImportError:
-        return None
-    return os.environ.get("GROQ_API_KEY") or None
-
-
-def _ask(api_key: str, changes: list) -> Explanation | None:
-    from langchain_groq import ChatGroq
-
-    model = ChatGroq(
-        api_key=api_key,
-        model=os.environ.get("GROQ_MODEL", DEFAULT_MODEL),
-        temperature=0,
-        timeout=_TIMEOUT,
-        max_retries=1,
-    )
-
+def _prompt(changes: list) -> str:
+    compact, omitted = llm.compact_changes(changes, limit=_MAX_CHANGES)
     # The facts are computed here and handed over. The model is asked to
     # explain them, not to work them out: it never sees a spec file, so it
     # cannot decide what counts as breaking.
-    facts = "\n".join(
-        f"- [{c.severity}] {c.operation or ''} {c.path or ''}: {c.text} (rule: {c.id})"
-        for c in changes
-    )
-
-    prompt = (
+    facts = llm.fit(llm.format_changes(compact, omitted), _BUDGET)
+    return (
         "You are reviewing breaking changes to an HTTP API, detected by a "
         "deterministic diff tool. The analysis below is already correct; do not "
         "dispute it or re-classify anything.\n\n"
         f"Detected changes:\n{facts}\n\n"
+        f"{llm.POLICY_RULES}\n\n"
         "Write, for the developer who is now blocked:\n"
         "1. impact - what breaks for existing consumers, concretely. Name the "
         "fields and endpoints. No preamble.\n"
-        "2. migration - how to ship this without breaking them. Two rules of "
-        "this system that you must respect:\n"
-        "   * To retire an ENDPOINT: set `deprecated: true` on the operation "
-        "(that exact key - there is no `x-deprecated`) plus an `x-sunset` date, "
-        "ship that, and delete it after the date passes. No exception needed.\n"
-        "   * A RESPONSE FIELD has no sunset mechanism. The breaking moment is "
-        "demoting it from required to optional; once optional, deleting it is "
-        "free. Suggest adding the replacement field first, then demoting.\n"
+        "2. migration - how to ship this without breaking them, following the "
+        "rules above. Prefer the deprecation route over a waiver.\n"
         "3. severity_note - optional, only if a reviewer would otherwise miss "
         "something.\n\n"
-        "Be concise and specific. Prefer the deprecation route over an exception."
+        "Be concise and specific."
     )
 
-    try:
-        structured = model.with_structured_output(Explanation)
-        answer = structured.invoke(prompt)
-    except Exception:  # noqa: BLE001
-        # Small models sometimes cannot produce valid structured output. Fall
-        # back to prose rather than losing the explanation entirely.
-        try:
-            raw = model.invoke(prompt)
-            text = getattr(raw, "content", "") or ""
-            return Explanation(impact=text.strip(), migration="") if text.strip() else None
-        except Exception:  # noqa: BLE001
-            return None
 
-    return answer if isinstance(answer, Explanation) else None
+def _ask(changes: list, *, model_name: str | None = None) -> Explanation | None:
+    """One structured call, with the shared fallbacks.
+
+    A rate limit moves to the other Groq model (llm.with_fallback). A model
+    that cannot produce valid structured output falls back to prose rather
+    than losing the explanation entirely.
+    """
+    prompt = _prompt(changes)
+
+    def call(model):
+        try:
+            answer = llm.structured(model, Explanation).invoke(prompt)
+            return answer if isinstance(answer, Explanation) else None
+        except Exception as exc:  # noqa: BLE001
+            if llm.is_rate_limit(exc):
+                raise  # let with_fallback try the other model
+            text = (getattr(model.invoke(prompt), "content", "") or "").strip()
+            return Explanation(impact=text, migration="") if text else None
+
+    try:
+        return llm.with_fallback("explain", call, name=model_name)
+    except Exception:  # noqa: BLE001 - advisory only
+        return None
 
 
 def _render(explanation: Explanation, changes: list) -> str:

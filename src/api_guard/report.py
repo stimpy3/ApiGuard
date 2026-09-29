@@ -109,6 +109,22 @@ def render_markdown(result: RunResult) -> str:
         lines += [f"- `{w.describe()}` (expires {w.expires.isoformat()})" for w in result.waivers.stale]
         lines.append("")
 
+    if result.waivers.expired:
+        lines += [
+            "## Expired waivers - remove them",
+            "",
+            "These waivers are past their date and were ignored: a change they "
+            "used to cover now counts as if they did not exist. Delete them from "
+            "the waivers file, or renew with a fresh reason and date if the change "
+            "is still acceptable:",
+            "",
+        ]
+        lines += [
+            f"- `{w.describe()}` (expired {w.expires.isoformat()}, approved by {w.approved_by})"
+            for w in result.waivers.expired
+        ]
+        lines.append("")
+
     if result.meta:
         lines += ["---", "", "<details><summary>Run details</summary>", ""]
         lines += [f"- **{key}**: {value}" for key, value in sorted(result.meta.items())]
