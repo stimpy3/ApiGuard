@@ -154,15 +154,22 @@ def main() -> None:
     server = FastMCP("api-guard")
 
     def _wrap(fn, description: str):
-        """Turn ReportUnavailable into a readable answer rather than a stack trace."""
+        """Turn ReportUnavailable into a readable answer rather than a stack trace.
 
+        functools.wraps is load-bearing: FastMCP builds each tool's input schema
+        from the function signature, and without __wrapped__ it sees only
+        (*args, **kwargs) — every client is then told the tools take `args`
+        and `kwargs`, and every call fails validation.
+        """
+        import functools
+
+        @functools.wraps(fn)
         def tool(*args, **kwargs):
             try:
                 return fn(*args, **kwargs)
             except ReportUnavailable as exc:
                 return {"error": str(exc)}
 
-        tool.__name__ = fn.__name__
         tool.__doc__ = description
         return tool
 
