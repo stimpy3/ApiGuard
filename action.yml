@@ -23,7 +23,7 @@ inputs:
     required: false
     default: ''
   only:
-    description: Comma-separated checks to run: freshness, breaking, conformance.
+    description: 'Comma-separated checks to run: freshness, breaking, conformance.'
     required: false
     default: ''
   version:
