@@ -269,10 +269,10 @@ the old one optional (needs a waiver) → delete the old one later.
 
 ### Waivers: what they are and why they exist
 
-**What:** a waiver is a written, time-limited permission for **one specific**
-breaking change. It says "we know this breaks something, we checked, it's
-acceptable until this date." The gate then lets that one change through, and
-only that one.
+**What:** a waiver is one entry in a file, `waivers.yaml`, that says: *"this
+specific break is on purpose, here's why, here's who agreed, and here's when
+this permission ends."* The gate then lets that one change through, and only
+that one.
 
 **Why they exist:** sometimes a break is the right call. A field is being
 replaced, every client has already migrated, or a security fix forces it.
@@ -281,31 +281,153 @@ past it, and a gate people routinely bypass stops being a gate. A waiver is the
 honest route: the break is allowed, **and** it is written down, reviewed and
 time-boxed.
 
-**Why not just an "ignore" list?** An ignore list lives forever. It keeps
-silently hiding every future break on that same field or endpoint, long after
-anyone remembers why it was added. Waivers are built to avoid exactly that:
+**api-guard doesn't know whether a break is a mistake or on purpose.** It only
+knows "something clients rely on was removed". A person decides which, and the
+waiver is how they say so.
+
+#### A waiver, start to finish
+
+The company decides users get `phone` instead of `email`. Priya makes the
+change on a branch.
+
+**1. api-guard blocks it.** The breaking check compares the spec on `main` with
+the spec on her branch, sees `email` is gone, and prints:
+
+```
+FAILED  breaking  1 breaking change(s) at or above ERR
+  [ERR] GET /users: removed the required property `email` from the response
+Fingerprints for waivers:
+  631dbccdc316  # response-required-property-removed
+```
+
+Exit code 1, so the pipeline stops before anything is published or deployed.
+
+**2. Priya decides.** If removing `email` was a mistake, she fixes the code and
+no waiver is needed. If it's on purpose, she adds to `waivers.yaml` in the
+project's repo:
 
 ```yaml
-# waivers.yaml
-- fingerprint: "3c11fcf1ab0e"          # which exact change (printed on failure)
-  id: response-property-became-optional
+- fingerprint: "631dbccdc316"          # copied from the failure output
+  id: response-required-property-removed
   path: /users
-  reason: "PROD-142 - email superseded by phone, both consumers migrated."
-  approved_by: sohan
+  reason: "PROD-142: switching to phone. Web v5 and mobile v3 no longer read email."
+  approved_by: priya
   expires: 2026-12-31
 ```
 
-- **One exact change.** Matched by fingerprint, so it covers only the change
-  it names, and reformatting the spec doesn't break it.
-- **A reason and a name are required.** `reason` needs at least 10 characters,
-  so "temp fix" is rejected. `approved_by` says who accepted the consequences.
-- **Reviewed in a pull request**, because `waivers.yaml` is committed. The
-  acknowledgement becomes part of git history.
-- **Expires.** An expired waiver fails the run (exit 2) until someone renews it
-  with a fresh reason, or deletes it. That forces the question "are clients
-  migrated yet? can the old field go now?" instead of forgetting it.
-- **Stale waivers** (ones that match nothing any more, usually because the
-  problem was fixed properly) are reported but don't fail the build.
+**3. Teammates review it.** The pull request now shows the code change *and*
+the waiver with its reason. If someone knows a client that still reads
+`email`, they object and it isn't merged. **This review is the human check.**
+api-guard makes sure the reason exists and is visible; people judge whether
+it's true.
+
+**4. api-guard passes.** On the next run the same break is found, its
+fingerprint matches the waiver, it's removed from the list, nothing is left,
+and the result is exit 0: `no breaking changes (1 waived)`. The report still
+shows the waived change, so nothing is hidden. The pull request merges and
+ships.
+
+```mermaid
+flowchart TD
+    A["Developer pushes a change"] --> B["api-guard breaking check<br/>main's spec vs. branch's spec"]
+    B -->|"no break"| P["PASS"]
+    B -->|"break found,<br/>fingerprint printed"| C{"Mistake or<br/>on purpose?"}
+    C -->|"mistake"| F["Fix the code, push again"]
+    C -->|"on purpose"| W["Add a waiver to waivers.yaml:<br/>fingerprint, reason, name, expiry"]
+    W --> R{"Teammates review<br/>the pull request"}
+    R -->|"someone objects"| N["Not merged"]
+    R -->|"approved"| M["Fingerprint matches the waiver<br/>PASS, 1 waived, merge and ship"]
+    M --> E["Expiry date passes:<br/>the run fails until the old line is removed"]
+```
+
+#### Who reads each field
+
+The file has two readers: the machine and people.
+
+| Field | Read by | Used for |
+|---|---|---|
+| `fingerprint` | **api-guard** | Which break to let through. The matching key |
+| `expires` | **api-guard** | After this date the waiver is refused and the run fails (exit 2) |
+| `reason` | **people** | Why it's OK. api-guard only checks it's a real sentence (at least 10 characters, so "temp fix" is rejected), never whether it's true |
+| `approved_by` | **people** | Who takes responsibility. api-guard only checks it isn't empty |
+| `id`, `path` | **people** | Optional. Helps a reader see what the fingerprint refers to |
+
+#### Where the fingerprint comes from and where it's used
+
+The fingerprint is **generated by oasdiff**, computed from the change itself:
+what kind of change, which endpoint, which field. It isn't random, so the same
+change gets the same fingerprint on every run and every machine, and
+reformatting the spec doesn't change it.
+
+1. oasdiff finds "email removed from GET /users" and computes `631dbccdc316`.
+2. api-guard prints it in the failure output.
+3. A person copies it into `waivers.yaml`. This is the only manual step;
+   `check --explain` prints a ready-made waiver block with the real
+   fingerprints filled in.
+4. On the next run oasdiff computes `631dbccdc316` again.
+5. The breaking check (`apply_waivers` in `policy.py`) compares each found
+   change's fingerprint with the waivers. Matches are removed before the
+   verdict. This is the only place fingerprints are used.
+
+`waivers.yaml` lives in **your project's repo** (e.g. `sample-api/waivers.yaml`),
+committed like code. `api-guard.yaml` points to it with `policy.waivers`.
+api-guard reads it at the start of every run, where it rejects badly written or
+expired entries, and again during the breaking check, for the matching.
+
+#### Why waivers expire: an example
+
+After Priya's change merges, `main` has no `email`, so later branches don't see
+that change any more. Her waiver sits in the file, unused. Now:
+
+- **2027:** another team adds `email` back, because a new partner integration
+  needs it. New clients start depending on it again.
+- **2028:** a developer removes `email` again during a refactor. It's the same
+  kind of change on the same field and endpoint, so it gets **the same
+  fingerprint**, `631dbccdc316`.
+
+| Without expiry | With expiry (2026-12-31) |
+|---|---|
+| api-guard finds Priya's 2026 waiver, matches it, and **silently lets the break through**. Her reason was about 2026's apps. The 2027 partner integration breaks, and nobody was warned | The waiver died in January 2027, and the run failed until someone removed the stale line. In 2028 the removal is **blocked**, and a person has to look at it fresh |
+
+A waiver is permission for **a situation at a point in time**. Its reason
+("these apps are migrated") is only true then. The expiry stops an old
+permission from approving a new situation, like a visitor pass instead of a
+permanent key.
+
+#### Choosing the expiry date
+
+A person chooses it; api-guard sets no maximum. **Set it to the date the reason
+stops being true, or the date you've promised to finish.**
+
+| Situation | Good expiry |
+|---|---|
+| All clients already migrated, just removing the old field | **Short**, e.g. 30 days. It only needs to cover the pull request being merged |
+| "Mobile v2 still reads `email`, but v2 is switched off on Nov 30" | **Nov 30**. If v2 isn't gone by then, the build makes someone check |
+| A temporary break during a 3-week migration | The end of the migration, plus a few days |
+| Not sure | 90 days at most, then look again |
+
+A waiver does its real work **until the pull request is merged**. After that,
+`main` already contains the change and the waiver no longer matches anything.
+So short dates are safer: the waiver gets the change through review, then
+expires and gets cleaned out, and can't be reused by accident later.
+
+#### Other rules
+
+- **Stale waivers** (matching nothing any more, usually because the problem was
+  fixed properly or the change is already on `main`) are listed in the report
+  but don't fail the build. Only expiry does.
+- **Duplicate fingerprints** in the file are rejected (exit 2).
+- **Why not an "ignore list"?** An ignore list lives forever and keeps silently
+  hiding every future break on the same field. Waivers are the same idea, but
+  written down, reviewed, tied to one exact change, and time-limited.
+
+### Waiver, sunset or approval?
+
+| Way through | For | Lasts |
+|---|---|---|
+| **Deprecation + sunset** | Removing a whole **endpoint**, planned in advance | No exception needed; you keep the promised date |
+| **Waiver** | Any other intended break, e.g. a **field**, decided in a pull request | Until its expiry date |
+| **Human approval** (`review` / Jenkins Approve button) | "This build must ship **now**", with no waiver in place | Only **this one build**. The next build blocks again |
 
 ---
 
@@ -740,6 +862,32 @@ flowchart LR
 
 ## 15. Running in Jenkins
 
+**In short: Jenkins checks the change, lets a human approve a blocked build,
+and deploys.**
+
+```
+BUILD AND GATE
+1. Check out the code (+ origin/main, to compare against)
+2. Build the app's Docker image
+3. Generate the spec, inside the app's image
+4. Start a temporary copy of the app
+5. api-guard review
+     exit 0 → go to SHIP
+     exit 1 → go to APPROVAL
+     exit 2 → stop (setup problem, no approval offered)
+
+APPROVAL (only if blocked)
+6. Wait up to 24 h for a human:
+     Approve + name            → api-guard approve → go to SHIP
+     Abort / no name / timeout → stop, nothing shipped
+
+SHIP
+7. Push the image to Docker Hub (only if the credential exists)
+8. Deploy to staging
+9. Smoke test: conformance against the deployed app
+     fails → roll back to the previous version
+```
+
 `sample-api/Jenkinsfile` is the full example. It has three top-level stages, so
 **no Jenkins executor is held while waiting for a human**:
 
@@ -789,6 +937,24 @@ runs at http://localhost:8080.
 ---
 
 ## 16. Running in GitHub Actions
+
+**In short: GitHub Actions only checks the change.** No deploy, no approval
+step. `sample-api/.github/workflows/api-guard.yml` runs on every push to `main`
+and on every pull request:
+
+```
+1. Check out the code (full history, so origin/main exists)
+2. Install the app's dependencies
+3. Generate the spec from the code   → generated.yaml
+4. Start the app                     (docker compose)
+5. Run api-guard                     → freshness + breaking + conformance
+     pass → green ✓
+     fail → red ✗, report posted as a pull request comment
+6. Stop the app
+```
+
+The difference in one line: **GitHub Actions checks. Jenkins checks, lets a
+human approve, and deploys.**
 
 api-guard is also a GitHub Action (`action.yml` in this repo):
 
