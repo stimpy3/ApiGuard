@@ -6,6 +6,8 @@ It reads your spec, never your source code, so it works on any codebase in any
 language. The only requirement is that your project can produce an OpenAPI
 document.
 
+Every command with an example: [COMMANDS.md](COMMANDS.md).
+
 ## What it checks
 
 | Check | Question | Fails when |
