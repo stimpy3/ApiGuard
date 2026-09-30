@@ -1,0 +1,174 @@
+"""The three human routes out of a paused review: approve, reject, question.
+
+In-process with a real SQLite file (the two-process guarantee is covered in
+test_review.py). The agent is stubbed wherever an answer is needed, so no
+network and no key.
+"""
+
+from __future__ import annotations
+
+from datetime import date, timedelta
+from pathlib import Path
+
+import pytest
+import yaml
+
+from api_guard.ai import graph, review
+from api_guard.policy import WaiverOutcome, load_waivers
+from api_guard.results import Change, CheckResult, Status
+from api_guard.verdict import decide
+
+pytest.importorskip("langgraph.checkpoint.sqlite", reason="needs the AI extra")
+
+REASON = "Both clients migrated to phone, confirmed on PROD-142."
+
+
+def _blocked_result():
+    """One ERR change that blocks, one WARN change that does not."""
+    return decide(
+        [CheckResult(name="breaking", status=Status.FAILED, summary="1 breaking change")],
+        [
+            Change(id="response-required-property-removed", text="removed `email`",
+                   operation="GET", path="/users", fingerprint="abc123"),
+            Change(id="request-property-removed", text="removed request property `email`",
+                   operation="POST", path="/users", fingerprint="warn99", severity="WARN"),
+        ],
+        WaiverOutcome(),
+        {"commit": "94cf4b0c9573", "branch": "demo/rename"},
+    )
+
+
+@pytest.fixture
+def paused(tmp_path: Path) -> Path:
+    state = tmp_path / "reviews.db"
+    outcome = review.start(_blocked_result(), state=state, review_id="42")
+    assert outcome.paused
+    return state
+
+
+# --- approve -> waiver to commit ---------------------------------------------
+
+
+def test_approval_produces_a_waiver_that_loads(paused: Path, tmp_path: Path) -> None:
+    """The snippet must be a real, valid waiver for exactly the blocking change."""
+    outcome = review.approve("42", "sohan", reason=REASON, expires_in_days=30, state=paused)
+
+    assert outcome.decision == "approve" and outcome.approved_by == "sohan"
+    entries = yaml.safe_load(outcome.waiver_snippet)
+    assert [e["fingerprint"] for e in entries] == ["abc123"], "only the change that blocked"
+
+    waivers_file = tmp_path / "waivers.yaml"
+    waivers_file.write_text(outcome.waiver_snippet, encoding="utf-8")
+    [waiver] = load_waivers(waivers_file)
+    assert waiver.approved_by == "sohan" and waiver.reason == REASON
+    assert waiver.expires == date.today() + timedelta(days=30)
+
+    assert "Add this to waivers.yaml" in outcome.report
+    assert "abc123" in outcome.report
+
+
+def test_approval_needs_a_real_reason(paused: Path) -> None:
+    with pytest.raises(review.ReviewError, match="at least 10 characters"):
+        review.approve("42", "sohan", reason="ok", state=paused)
+
+
+def test_approval_expiry_stays_within_policy(paused: Path) -> None:
+    with pytest.raises(review.ReviewError, match="between 1 and 90"):
+        review.approve("42", "sohan", reason=REASON, expires_in_days=365, state=paused)
+
+
+def test_policy_from_the_config_reaches_the_approval(tmp_path: Path) -> None:
+    """fail_on WARN makes the WARN change blocking too; max days comes along."""
+    state = tmp_path / "reviews.db"
+    review.start(_blocked_result(), state=state, review_id="7", fail_on="WARN", max_waiver_days=10)
+
+    with pytest.raises(review.ReviewError, match="between 1 and 10"):
+        review.approve("7", "sohan", reason=REASON, expires_in_days=30, state=state)
+    outcome = review.approve("7", "sohan", reason=REASON, expires_in_days=10, state=state)
+    assert {e["fingerprint"] for e in yaml.safe_load(outcome.waiver_snippet)} == {"abc123", "warn99"}
+
+
+# --- reject -> checklist -----------------------------------------------------
+
+
+def test_rejection_records_who_why_and_what_next(paused: Path) -> None:
+    outcome = review.reject("42", "lead", reason="Billing still reads email.", state=paused)
+
+    assert outcome.decision == "reject" and not outcome.paused
+    assert any("abc123" in item for item in outcome.checklist)
+    assert "Rejected by lead" in outcome.report
+    assert "Billing still reads email." in outcome.report
+    assert not outcome.waiver_snippet, "a rejection never produces a waiver"
+
+    with pytest.raises(review.ReviewError, match="not waiting for a decision"):
+        review.approve("42", "sohan", reason=REASON, state=paused)
+
+
+def test_rejection_needs_a_reason(paused: Path) -> None:
+    with pytest.raises(review.ReviewError, match="reason"):
+        review.reject("42", "lead", reason="  ", state=paused)
+
+
+# --- question loop -----------------------------------------------------------
+
+
+def test_question_is_answered_from_the_saved_facts_then_it_pauses_again(paused: Path, monkeypatch) -> None:
+    from api_guard.ai import agent, llm
+
+    seen = {}
+
+    def fake_answer(question, facts):
+        seen["facts"] = facts
+        return agent.Answer(text="Yes: GET /users no longer returns email.", confidence="high")
+
+    monkeypatch.setattr(llm, "available", lambda: True)
+    monkeypatch.setattr(agent, "answer_review", fake_answer)
+
+    outcome = review.ask("42", "Does this break the mobile app?", state=paused)
+    assert outcome.paused, "after an answer, the approver still has to decide"
+    assert outcome.answer.startswith("Yes: GET /users")
+    assert "abc123" in seen["facts"], "the agent starts from the review's saved facts"
+    assert "Does this break the mobile app?" in outcome.question
+    assert "4 left" in outcome.question
+
+    final = review.approve("42", "sohan", reason=REASON, state=paused)
+    assert "Does this break the mobile app?" in final.report, "the Q&A is part of the record"
+
+
+def test_question_limit(paused: Path) -> None:
+    for i in range(graph.MAX_QUESTIONS):
+        assert review.ask("42", f"question {i}?", state=paused).paused
+    with pytest.raises(review.ReviewError, match="limit of 5 questions"):
+        review.ask("42", "one more?", state=paused)
+    assert review.reject("42", "lead", reason="enough questions, no", state=paused).decision == "reject"
+
+
+def test_agent_loop_never_uses_the_reviews_checkpointer(paused: Path, monkeypatch) -> None:
+    """Regression: run inside the review graph, the agent inherited the review's
+    sync SQLite saver and every question failed with NotImplementedError."""
+    import asyncio
+
+    from langchain_core.messages import AIMessage
+
+    from api_guard.ai import agent, llm
+    from test_agent import ScriptedModel, get_build_context
+
+    def answer_with_real_loop(question, facts):
+        model = ScriptedModel(messages=iter([
+            AIMessage(content="", tool_calls=[{"name": "get_build_context", "args": {"build_id": "local"}, "id": "c1"}]),
+            AIMessage(content="It breaks GET /users.\nConfidence: high - in the facts"),
+        ]))
+        model.seen = []
+        compiled = agent.build_agent(model, [get_build_context])
+        return asyncio.run(agent.run(compiled, question, facts=facts))
+
+    monkeypatch.setattr(llm, "available", lambda: True)
+    monkeypatch.setattr(agent, "answer_review", answer_with_real_loop)
+    outcome = review.ask("42", "What breaks?", state=paused)
+    assert outcome.answer == "It breaks GET /users."
+
+
+def test_with_ai_off_a_question_still_gets_an_honest_reply(paused: Path) -> None:
+    outcome = review.ask("42", "What breaks?", state=paused)
+    assert "AI is off" in outcome.answer
+    assert outcome.paused

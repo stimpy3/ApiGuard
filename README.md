@@ -434,7 +434,7 @@ expires and gets cleaned out, and can't be reused by accident later.
 |---|---|---|
 | **Deprecation + sunset** | Removing a whole **endpoint**, planned in advance | No exception needed; you keep the promised date |
 | **Waiver** | Any other intended break, e.g. a **field**, decided in a pull request | Until its expiry date |
-| **Human approval** (`review` / Jenkins Approve button) | "This build must ship **now**", with no waiver in place | Only **this one build**. The next build blocks again |
+| **Human approval** (`review` / Jenkins Approve button) | "This build must ship **now**", with no waiver in place | **This build** ships, and the approver gets the waiver entries to commit. Until they're committed, the next build blocks again |
 
 ---
 
@@ -608,10 +608,17 @@ flowchart TD
     D -->|"verdict = error<br/>blocked, nothing to approve"| R
     D -->|"check --explain<br/>never pauses"| R
     D -->|"verdict = failed"| H["human_approval<br/>show full context, PAUSE,<br/>save state, exit"]
-    H -. "later, any process:<br/>api-guard approve 42 --by sohan" .-> H2["resume with approver's name"]
-    H2 --> R
+    H -->|"ask-review: a question"| Q["answer_question<br/>our agent answers from the saved<br/>facts, tools only if needed"]
+    Q -->|"pause again, answer shown<br/>max 5 questions"| H
+    H -->|"approve --by --reason"| A["approve<br/>waiver entries to commit"]
+    H -->|"reject --by --reason<br/>or CI timeout"| J["reject<br/>who, why, fix checklist"]
+    A --> R
+    J --> R
     R --> END(["done"])
 ```
+
+Each arrow out of `human_approval` is a separate command, possibly days apart
+and in different processes. The graph resumes from the SQLite file every time.
 
 **The conditions, exactly:**
 
@@ -626,9 +633,15 @@ flowchart TD
 | decide | verdict is `failed` (and running `review`) | `needs_approval = true`: go to human_approval |
 | decide | verdict is `error` | blocked, **no** approval: a tooling failure proved nothing, so there's nothing to sign off |
 | decide | verdict is `passed`, or running `check --explain` | straight to the report |
-| human_approval | approver gives a name | recorded in `review.md` as "Approved to ship by …" |
-| approve | empty name | refused |
-| approve | review already finished, or unknown ID | refused, exit 2 |
+| human_approval | `ask-review` with a question | our agent answers, then the review pauses again with the answer added |
+| human_approval | `approve` | `approve` step: waiver entries for every blocking fingerprint |
+| human_approval | `reject`, or the CI's approval window runs out | `reject` step: who, why, and a fix checklist |
+| ask-review | 5 questions already asked | refused: approve or reject |
+| ask-review | AI off or no key | recorded as "AI is off", review still waiting |
+| approve | empty name, or reason under 10 characters | refused (the reason becomes the waiver's reason) |
+| approve | `--expires-in` outside 1..`max_waiver_days` | refused |
+| reject | empty name or reason | refused |
+| any decision | review already decided, or unknown ID | refused, exit 2 |
 
 The band chooses **which model writes the explanation**, and nothing else.
 
@@ -645,7 +658,10 @@ the LLM step entirely and confirms the decision doesn't change.
 | classify_severity | `band`, `rationale` |
 | explain | `impact`, `migration`, `severity_note`, which model wrote it, and the markdown section |
 | decide | `blocked`, `needs_approval` |
-| human_approval | the exact `question` shown, and `approved_by` |
+| human_approval | the exact `question` shown, the decision, who, why, the waiver expiry |
+| answer_question | each question with its answer and the tools used, appended (never overwritten) |
+| approve | the waiver entries (`waiver_snippet`) |
+| reject | the fix `checklist` |
 | render_report | the final `report` text |
 
 Because the explanation is saved, an approver who answers days later sees
@@ -675,16 +691,40 @@ A test runs the pause in one Python process and the approval in a
 **brand-new process** that shares only the SQLite file, and confirms the
 earlier steps didn't run again.
 
-### What approval does and doesn't do
+### The three decisions
 
-- It **does** record who signed off, in `review.md`.
-- It **doesn't** change the verdict or `result.json`. Whether a signed-off
-  failure may ship is the pipeline's decision. In Jenkins, an approved build
-  ships and finishes **UNSTABLE** (yellow), because the test report still
-  lists the breaks.
-- **Rejecting** today happens in the CI system (Jenkins' Abort button, or
-  simply never approving). The saved review stays paused. See
-  [Known gaps](#20-known-gaps).
+**Approve.** This build ships. And because a Jenkins click can't edit git,
+`review.md` (and the command's output) carry the exact waiver entries to paste
+into `waivers.yaml` in the pull request, so the **next** build of the branch
+passes without another approval:
+
+```yaml
+- fingerprint: 631dbccdc316
+  id: response-required-property-removed
+  path: /users
+  reason: Both consumers migrated, confirmed on PROD-142.
+  approved_by: sohan
+  expires: 2026-10-30
+```
+
+The entries cover exactly the changes that blocked (at or above `fail_on`),
+use the approver's name and reason, expire in `--expires-in` days (default 30,
+at most `max_waiver_days`), and are validated with the same rules as a
+hand-written waiver.
+
+**Reject.** Nothing ships. `review.md` records who rejected and why, and a fix
+checklist: every blocking change with its fingerprint, the model's safer
+route, and how to proceed if the break turns out to be intended. No model call.
+
+**Ask a question** (up to 5). Our agent answers, starting from what the review
+already saved (the same text the approver sees), so easy questions need no
+tool calls. It calls the MCP tools only for what those facts don't cover. The
+answer is added to the approval request, the review waits again, and every
+question and answer ends up in `review.md`.
+
+None of the three changes the verdict or `result.json`. In Jenkins, an
+approved build ships and finishes **UNSTABLE** (yellow), because the test
+report still lists the breaks until the waiver is committed.
 
 ---
 
@@ -1130,9 +1170,11 @@ Or skip installing entirely and use Docker (section 13).
 
 | Command | Example | Use it when |
 |---|---|---|
-| `review` | `api-guard review --id 42` | Same as `check`, but a blocked build pauses for sign-off |
-| `approve` | `api-guard approve 42 --by sohan` | Someone decides to ship the break; writes `review.md` |
-| `--state` | `api-guard review --id 42 --state /shared/reviews.db` | The saved review must outlive the workspace (use the same path with `approve`) |
+| `review` | `api-guard review --id 42` | Same as `check`, but a blocked build pauses for a decision |
+| `ask-review` | `api-guard ask-review 42 "does this break the mobile app?"` | Before deciding: our agent answers from the saved review (max 5 per review) |
+| `approve` | `api-guard approve 42 --by sohan --reason "Both clients migrated, PROD-142" --expires-in 30` | Ship the break; `review.md` gets the waiver entries to commit |
+| `reject` | `api-guard reject 42 --by lead --reason "Billing still reads email"` | Don't ship; `review.md` gets who, why and a fix checklist |
+| `--state` | `api-guard review --id 42 --state /shared/reviews.db` | The saved review must outlive the workspace (use the same path for every command) |
 
 ### MCP server
 
@@ -1218,10 +1260,8 @@ api-guard/
 
 Stated plainly, so nobody discovers them the hard way:
 
-- **Rejecting a review** happens only in the CI system. The LangGraph workflow
-  has no reject route yet, and no "ask a question" loop for the approver.
-- **Approval doesn't create a waiver**, so the same break blocks again on the
-  next build.
+- **An approval's waiver must be pasted in by hand.** CI can't write to git, so
+  the entries are printed ready to paste rather than committed for you.
 - **Only Groq is implemented** as a provider. `llm.py` is the single place
   another free provider would be added.
 - **The shared Jenkins library** (`jenkins/vars/apiGuard.groovy`) runs `check`

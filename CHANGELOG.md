@@ -38,6 +38,22 @@ Semver tags mean nothing to a consumer without this file: someone pinning
 - Shared rules now also say a required request field breaks clients whenever
   it's introduced.
 
+### Approve, reject or ask
+
+- A paused review now has three ways forward, each a separate command that
+  resumes the saved graph:
+  - `approve ID --by --reason [--expires-in 30]`: this build ships, and
+    `review.md` carries waiver entries for exactly the blocking fingerprints,
+    validated like a hand-written waiver, ready to commit so the next build
+    passes without another approval. `--reason` is now required.
+  - `reject ID --by --reason`: records who and why, with a fix checklist.
+  - `ask-review ID "question"`: our agent answers from the review's saved
+    facts (tools only if needed); the review pauses again with the answer
+    shown. At most 5 questions per review.
+- Every question and answer is kept in the checkpoint and in `review.md`.
+- The agent's inner loop is never checkpointed, so it can run inside the
+  review graph.
+
 ### Waivers
 
 - Expired waivers are **ignored with a warning** instead of failing the build.

@@ -200,7 +200,11 @@ def build_agent(
     # tools_condition: tool calls in the last message -> "tools", otherwise END.
     graph.add_conditional_edges("model", tools_condition, {"tools": "tools", END: END})
     graph.add_edge("tools", "model")
-    return graph.compile()
+    # Never checkpointed. When a review question runs this loop inside the
+    # review graph, LangGraph would otherwise hand it the review's SQLite
+    # saver, which cannot serve this loop's async calls, and the loop has
+    # nothing worth persisting: the answer is saved by the review itself.
+    return graph.compile(checkpointer=False)
 
 
 def _rate_limit_errors() -> tuple[type[BaseException], ...]:
@@ -250,13 +254,32 @@ async def run(
     *,
     max_rounds: int = MAX_TOOL_ROUNDS,
     on_step: Callable[[str], None] | None = None,
+    facts: str | None = None,
 ) -> Answer:
     """Run the loop. `on_step` is called with each tool call as it happens,
-    so a UI can show the investigation live rather than after the fact."""
+    so a UI can show the investigation live rather than after the fact.
+
+    `facts` is what a review already knows (changes, fingerprints, risk label,
+    explanation). It goes in front of the question, so easy questions are
+    answered with no tool calls at all; the tools stay available for anything
+    the facts don't cover. It is text the review saved anyway — nothing new
+    is stored for it.
+    """
     from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
     from langgraph.errors import GraphRecursionError
 
-    messages = [SystemMessage(SYSTEM), HumanMessage(question)]
+    prompt = question
+    if facts:
+        prompt = (
+            "An approver is deciding whether to ship a blocked build. What the "
+            "review already knows about it (this build's full report is also "
+            'available through the tools as build id "local"):\n\n'
+            f"{llm.fit(facts, 1500)}\n\n"
+            "Answer from these facts if they are enough. Call a tool only for "
+            "something they don't cover.\n\n"
+            f"The approver asks: {question}"
+        )
+    messages = [SystemMessage(SYSTEM), HumanMessage(prompt)]
     # Each round is two graph steps (model, tools), plus the final answer.
     config = {"recursion_limit": 2 * max_rounds + 1}
 
@@ -402,7 +425,10 @@ def _models() -> tuple[Any, Any | None]:
 
 
 async def _ask(
-    question: str, server_env: dict[str, str], on_step: Callable[[str], None] | None = None
+    question: str,
+    server_env: dict[str, str],
+    on_step: Callable[[str], None] | None = None,
+    facts: str | None = None,
 ) -> Answer:
     from langchain_mcp_adapters.client import MultiServerMCPClient
     from langchain_mcp_adapters.tools import load_mcp_tools
@@ -421,7 +447,9 @@ async def _ask(
     # One server process for the whole conversation, rather than one per call.
     async with client.session("api-guard") as session:
         tools = [_cap(t) for t in await load_mcp_tools(session)]
-        return await run(build_agent(model, tools, fallback=fallback), question, on_step=on_step)
+        return await run(
+            build_agent(model, tools, fallback=fallback), question, on_step=on_step, facts=facts
+        )
 
 
 def ask(
@@ -441,17 +469,8 @@ def ask(
     except ImportError as exc:
         raise AskError("ask needs the AI extra: pip install 'api-guard[ai]'") from exc
 
-    env = dict(os.environ)
-    # The server runs as a child process and must be able to import api_guard
-    # even from a source checkout that was never pip-installed.
-    env["PYTHONPATH"] = os.pathsep.join(p for p in [*sys.path, env.get("PYTHONPATH", "")] if p)
-    if jenkins_url:
-        env["JENKINS_URL"] = jenkins_url
-    if job:
-        env["JENKINS_JOB"] = job
-
     try:
-        return asyncio.run(_ask(question, env, on_step))
+        return asyncio.run(_ask(question, _server_env(jenkins_url, job), on_step))
     except AskError:
         raise
     except Exception as exc:  # noqa: BLE001 - provider, MCP or process failure
@@ -463,6 +482,35 @@ def ask(
                 "a minute. Wait a minute, or ask a narrower question."
             ) from exc
         raise AskError(f"could not answer: {type(root).__name__}: {root}") from exc
+
+
+def answer_review(question: str, facts: str) -> Answer:
+    """Answer an approver's question about a paused review.
+
+    The same agent and guards as `ask`, starting from the review's saved
+    facts. Raises AskError, never anything else.
+    """
+    if not question.strip():
+        raise AskError("ask-review needs a question")
+    try:
+        return asyncio.run(_ask(question, _server_env(None, None), None, facts))
+    except AskError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - provider, MCP or process failure
+        root = _root_cause(exc)
+        raise AskError(f"could not answer: {type(root).__name__}: {root}") from exc
+
+
+def _server_env(jenkins_url: str | None, job: str | None) -> dict[str, str]:
+    env = dict(os.environ)
+    # The server runs as a child process and must be able to import api_guard
+    # even from a source checkout that was never pip-installed.
+    env["PYTHONPATH"] = os.pathsep.join(p for p in [*sys.path, env.get("PYTHONPATH", "")] if p)
+    if jenkins_url:
+        env["JENKINS_URL"] = jenkins_url
+    if job:
+        env["JENKINS_JOB"] = job
+    return env
 
 
 def _root_cause(exc: BaseException) -> BaseException:

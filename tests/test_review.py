@@ -51,7 +51,7 @@ def must_not_run(_state):
     raise AssertionError("classify_severity ran again on resume")
 
 graph._classify = must_not_run
-out = review.approve("42", "sohan", state=Path(STATE))
+out = review.approve("42", "sohan", reason="Both clients migrated, PROD-142.", state=Path(STATE))
 print(json.dumps({"paused": out.paused, "report": out.report, "approved_by": out.approved_by}))
 """
 
@@ -72,7 +72,7 @@ def test_approval_resumes_in_a_different_process(tmp_path: Path) -> None:
 
     first = _run(START, state)
     assert first["paused"] is True
-    assert "Approve shipping this anyway?" in first["question"]
+    assert "Approve (ships this build" in first["question"]
     assert state.exists(), "the pause must be written to disk, not held in memory"
 
     second = _run(APPROVE, state)
@@ -91,8 +91,8 @@ def test_cannot_approve_twice(tmp_path: Path) -> None:
     _run(START, state)
     _run(APPROVE, state)
 
-    with pytest.raises(review.ReviewError, match="not waiting for approval"):
-        review.approve("42", "someone-else", state=state)
+    with pytest.raises(review.ReviewError, match="not waiting for a decision"):
+        review.approve("42", "someone-else", reason="a perfectly good reason here", state=state)
 
 
 def test_unknown_review_is_reported_plainly(tmp_path: Path) -> None:
@@ -102,7 +102,7 @@ def test_unknown_review_is_reported_plainly(tmp_path: Path) -> None:
     _run(START, state)
 
     with pytest.raises(review.ReviewError, match="no review 'nope'"):
-        review.approve("nope", "sohan", state=state)
+        review.approve("nope", "sohan", reason="a perfectly good reason here", state=state)
 
 
 def test_review_id_cannot_be_reused(tmp_path: Path) -> None:
@@ -153,7 +153,7 @@ def test_cli_signals_ci_through_the_approval_request_file(tmp_path: Path, monkey
     assert cli.main(["review", "--id", "8"]) == 0
     assert not request.exists(), "a stale request would make CI wait for nothing"
 
-    assert cli.main(["approve", "7", "--by", "sohan"]) == 0
+    assert cli.main(["approve", "7", "--by", "sohan", "--reason", "Both clients migrated, PROD-142."]) == 0
     assert "Approved to ship by **sohan**" in (
         tmp_path / "api-guard-report" / "review.md"
     ).read_text(encoding="utf-8")
@@ -166,4 +166,4 @@ def test_approval_needs_a_name(tmp_path: Path) -> None:
     _run(START, state)
 
     with pytest.raises(review.ReviewError, match="needs a name"):
-        review.approve("42", "  ", state=state)
+        review.approve("42", "  ", reason="a perfectly good reason here", state=state)

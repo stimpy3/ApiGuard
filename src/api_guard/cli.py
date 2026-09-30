@@ -122,19 +122,51 @@ def main(argv: list[str] | None = None) -> int:
     approve = sub.add_parser(
         "approve",
         help=(
-            "Resume a paused review with a named approver. Records sign-off in "
-            "the report; the reviewed run's verdict is unchanged."
+            "Approve a paused review: this build may ship, and review.md gets "
+            "waiver entries to commit so the next build passes too. The "
+            "reviewed run's verdict is unchanged."
         ),
     )
     approve.add_argument("review_id", help="The id printed by `api-guard review`.")
     approve.add_argument("--by", required=True, help="Who is approving.")
-    approve.add_argument("--state", type=Path, default=None, help="Same file as `review --state`.")
     approve.add_argument(
-        "--out",
-        type=Path,
-        default=Path("api-guard-report") / "review.md",
-        help="Where to write the signed-off report (default: api-guard-report/review.md).",
+        "--reason",
+        required=True,
+        help="Why this break is acceptable (at least 10 characters). Becomes the waiver's reason.",
     )
+    approve.add_argument(
+        "--expires-in",
+        type=int,
+        default=30,
+        metavar="DAYS",
+        help="Days until the waiver expires (default 30, at most policy.max_waiver_days).",
+    )
+
+    reject = sub.add_parser(
+        "reject", help="Reject a paused review: record who and why, with a checklist of next steps."
+    )
+    reject.add_argument("review_id", help="The id printed by `api-guard review`.")
+    reject.add_argument("--by", required=True, help="Who is rejecting.")
+    reject.add_argument("--reason", required=True, help="Why it can't ship.")
+
+    ask_review = sub.add_parser(
+        "ask-review",
+        help=(
+            "Ask our agent a question about a paused review before deciding. It "
+            "answers from the saved review, using tools only if needed."
+        ),
+    )
+    ask_review.add_argument("review_id", help="The id printed by `api-guard review`.")
+    ask_review.add_argument("question", nargs="+", help='e.g. "does this break the mobile app?"')
+
+    for decision in (approve, reject, ask_review):
+        decision.add_argument("--state", type=Path, default=None, help="Same file as `review --state`.")
+        decision.add_argument(
+            "--report-dir",
+            type=Path,
+            default=Path("api-guard-report"),
+            help="Where review.md and approval-request.md go (default: api-guard-report).",
+        )
 
     ask = sub.add_parser(
         "ask",
@@ -165,8 +197,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "ask":
         return _ask(" ".join(args.question), job=args.job, jenkins_url=args.jenkins_url)
 
-    if args.command == "approve":
-        return _approve(args.review_id, args.by, state=args.state, out=args.out)
+    if args.command in ("approve", "reject", "ask-review"):
+        return _decide(args)
 
     if args.command in ("check", "review"):
         selected = None
@@ -258,7 +290,9 @@ def _run_check(
     _print_summary(result, written)
 
     if review is not None:
-        _start_review(result, *review, report_dir=config.resolve(config.report.dir))
+        _start_review(
+            result, *review, report_dir=config.resolve(config.report.dir), policy=config.policy
+        )
 
     return result.exit_code
 
@@ -410,7 +444,12 @@ def _explain(result: RunResult) -> str | None:
 
 
 def _start_review(
-    result: RunResult, state: Path | None, review_id: str | None, *, report_dir: Path
+    result: RunResult,
+    state: Path | None,
+    review_id: str | None,
+    *,
+    report_dir: Path,
+    policy=None,
 ) -> None:
     """Run the approval workflow on a finished check.
 
@@ -432,20 +471,20 @@ def _start_review(
         return
 
     state = state or workflow.DEFAULT_STATE
+    extra = {}
+    if policy is not None:
+        extra = {"fail_on": str(policy.fail_on), "max_waiver_days": policy.max_waiver_days}
     try:
-        outcome = workflow.start(result, state=state, review_id=review_id)
+        outcome = workflow.start(result, state=state, review_id=review_id, **extra)
     except workflow.ReviewError as exc:
         print(f"api-guard: review not started: {exc}", file=sys.stderr)
         return
 
     if outcome.paused:
-        print(f"\n  Review {outcome.review_id} is waiting for approval.")
+        print(f"\n  Review {outcome.review_id} is waiting for a decision.")
         print("  " + outcome.question.replace("\n", "\n  "))
-        print(f"\n  To sign off:  api-guard approve {outcome.review_id} --by <name> --state {state}")
-        request.parent.mkdir(parents=True, exist_ok=True)
-        request.write_text(
-            f"Review {outcome.review_id}\n\n{outcome.question}\n", encoding="utf-8"
-        )
+        _print_decision_help(outcome.review_id, state)
+        _write_request(report_dir, outcome)
         return
 
     path = report_dir / "review.md"
@@ -454,24 +493,81 @@ def _start_review(
     print(f"\n  Review {outcome.review_id} complete, no approval needed: {path}")
 
 
-def _approve(review_id: str, approved_by: str, *, state: Path | None, out: Path) -> int:
-    """Resume a paused review. Exit 0 once sign-off is recorded, 2 otherwise."""
+def _print_decision_help(review_id: str, state: Path) -> None:
+    print(
+        f"\n  Decide with one of:\n"
+        f"    api-guard approve {review_id} --by <name> --reason \"<why it's acceptable>\" --state {state}\n"
+        f"    api-guard reject {review_id} --by <name> --reason \"<why not>\" --state {state}\n"
+        f"    api-guard ask-review {review_id} \"<question>\" --state {state}"
+    )
+
+
+def _write_request(report_dir: Path, outcome) -> None:
+    request = report_dir / "approval-request.md"
+    request.parent.mkdir(parents=True, exist_ok=True)
+    request.write_text(f"Review {outcome.review_id}\n\n{outcome.question}\n", encoding="utf-8")
+
+
+def _decide(args) -> int:
+    """approve / reject / ask-review. Exit 0 once recorded, 2 if refused."""
     try:
         from api_guard.ai import review as workflow
     except ImportError:
-        print("api-guard: approve needs the AI extra: pip install 'api-guard[ai]'", file=sys.stderr)
+        print(f"api-guard: {args.command} needs the AI extra: pip install 'api-guard[ai]'", file=sys.stderr)
         return EXIT_TOOL_ERROR
 
+    state = args.state or workflow.DEFAULT_STATE
     try:
-        outcome = workflow.approve(review_id, approved_by, state=state or workflow.DEFAULT_STATE)
+        if args.command == "approve":
+            outcome = workflow.approve(
+                args.review_id, args.by, reason=args.reason,
+                expires_in_days=args.expires_in, state=state,
+            )
+        elif args.command == "reject":
+            outcome = workflow.reject(args.review_id, args.by, reason=args.reason, state=state)
+        else:
+            outcome = workflow.ask(args.review_id, " ".join(args.question), state=state)
     except workflow.ReviewError as exc:
         print(f"api-guard: {exc}", file=sys.stderr)
         return EXIT_TOOL_ERROR
 
+    request = args.report_dir / "approval-request.md"
+    if outcome.paused:
+        # A question: the review is waiting again, and the request now
+        # carries the answer, so CI shows it in the next form.
+        _reconfigure_stdout()
+        print(outcome.answer)
+        print(
+            "\n(Model-written from the saved review, advisory only. It can't approve "
+            "or reject anything; you decide.)"
+        )
+        _write_request(args.report_dir, outcome)
+        _print_decision_help(args.review_id, state)
+        return 0
+
+    request.unlink(missing_ok=True)
+    out = args.report_dir / "review.md"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(outcome.report, encoding="utf-8")
-    print(f"Review {review_id} approved by {outcome.approved_by}: {out}")
+    if outcome.decision == "reject":
+        print(f"Review {args.review_id} rejected by {args.by}. Checklist in {out}:")
+        for i, item in enumerate(outcome.checklist, 1):
+            print(f"  {i}. {item}")
+    else:
+        print(f"Review {args.review_id} approved by {outcome.approved_by}: {out}")
+        if outcome.waiver_snippet:
+            print("\nAdd this to waivers.yaml in the pull request, so the next build passes too:\n")
+            print(outcome.waiver_snippet)
     return 0
+
+
+def _reconfigure_stdout() -> None:
+    # Model output contains typographic characters (narrow spaces, dashes) that
+    # a Windows cp1252 console cannot encode. Degrade them, don't crash on them.
+    try:
+        sys.stdout.reconfigure(errors="replace")
+    except (AttributeError, ValueError):
+        pass
 
 
 def _ask(question: str, *, job: str | None, jenkins_url: str | None) -> int:
