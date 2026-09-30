@@ -41,6 +41,7 @@ class Evidence(Protocol):
     def conformance_failures(self) -> list[str]: ...
     def waivers_applied(self) -> list[dict]: ...
     def describe(self) -> str: ...
+    def context(self) -> dict: ...
 
 
 class LocalEvidence:
@@ -69,6 +70,10 @@ class LocalEvidence:
 
     def describe(self) -> str:
         return "this build (in-process)"
+
+    def context(self) -> dict:
+        """Commit and branch, for the approval question."""
+        return dict(self._result.meta)
 
 
 class McpEvidence:
@@ -108,3 +113,6 @@ class McpEvidence:
 
     def describe(self) -> str:
         return f"build {self._build_id} (via MCP)"
+
+    def context(self) -> dict:
+        return dict(self._report().get("meta", {}))

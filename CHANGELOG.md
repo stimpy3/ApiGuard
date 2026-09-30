@@ -22,6 +22,22 @@ Semver tags mean nothing to a consumer without this file: someone pinning
 - `AI_PROVIDER` setting (only `groq` implemented; anything else turns AI off).
   Tests set it to `off`, so a real key in `.env` is never spent by a test run.
 
+### One review workflow
+
+- `--explain` is now a step inside the review graph
+  (evidence → triage → explain → decide → human), so the report and the
+  approver see the same explanation. `check --explain` runs the graph without
+  the human step.
+- Triage picks the explanation's model: the small one for routine changes,
+  the larger one for risky or unclassified ones. The band still never reaches
+  a decision.
+- The approval question now carries the full context: commit and branch, every
+  change with its fingerprint, the risk label with its reason, what breaks and
+  the safer route. It is saved in the checkpoint, so a late approver sees
+  exactly what was generated at build time.
+- Shared rules now also say a required request field breaks clients whenever
+  it's introduced.
+
 ### Waivers
 
 - Expired waivers are **ignored with a warning** instead of failing the build.

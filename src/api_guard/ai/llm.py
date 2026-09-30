@@ -52,6 +52,10 @@ POLICY_RULES = """This project's rules for shipping a change without breaking co
 - A RESPONSE FIELD has no sunset. Add the replacement field first. Demoting the
   old field from required to optional IS the breaking step and needs a waiver;
   once it is optional, deleting it is free.
+- A REQUEST FIELD that is required breaks every client that doesn't send it,
+  whenever it happens: adding a new required field, or later making an
+  optional one required, both need a waiver. Add new request fields as
+  optional.
 - A waiver is an entry in waivers.yaml with exactly these keys: fingerprint,
   id, path, reason, approved_by, expires. The fingerprint comes from the
   report; never make one up. Expiry at most 90 days ahead by default."""

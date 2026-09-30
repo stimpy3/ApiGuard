@@ -175,10 +175,90 @@ def test_decide_never_reads_the_model_output() -> None:
                 if isinstance(first, ast.Constant) and isinstance(first.value, str):
                     accessed.add(first.value)
 
-    forbidden = accessed & {"band", "rationale"}
+    forbidden = accessed & {"band", "rationale", "impact", "migration", "analysis", "severity_note"}
     assert not forbidden, (
         f"_decide reads {sorted(forbidden)} from the state. The node that "
         "decides must use only the deterministic results, however tempting the "
         "model's opinion sitting right beside them."
     )
     assert "verdict" in accessed, "sanity check: _decide should read the verdict"
+
+
+# --- phase 2: explain inside the graph --------------------------------------
+
+
+def _explaining(monkeypatch, band: str, seen: dict | None = None):
+    """A model is 'available', triage returns `band`, and explain returns fixed text."""
+    from api_guard.ai import explain, llm
+
+    monkeypatch.setattr(llm, "available", lambda: True)
+    monkeypatch.setattr(g, "_classify", lambda state: {"band": band, "rationale": "stubbed reason"})
+    answer = explain.Explanation(
+        impact="Clients reading user.email will crash.",
+        migration="Add email_address first, keep email, demote later with a waiver.",
+    )
+
+    def fake_ask(changes, *, model_name=None):
+        if seen is not None:
+            seen["model"] = model_name
+        return answer
+
+    monkeypatch.setattr(explain, "_ask", fake_ask)
+    return answer
+
+
+@pytest.mark.parametrize("band", ["routine", "risky", "unknown"])
+def test_band_picks_which_model_writes_the_explanation(monkeypatch, band: str) -> None:
+    """The one thing the band may influence: the cheaper model for routine changes."""
+    from api_guard.ai import llm
+
+    seen: dict = {}
+    _explaining(monkeypatch, band, seen)
+    state = g.build(FakeEvidence(verdict="passed")).invoke({})
+
+    assert seen["model"] == (llm.SMALL if band == "routine" else llm.model_name("explain"))
+    assert state["impact"].startswith("Clients reading")
+    assert state["needs_approval"] is False, "the explanation never changes the decision"
+
+
+def test_approver_sees_the_full_context(monkeypatch) -> None:
+    from langgraph.checkpoint.memory import MemorySaver
+
+    _explaining(monkeypatch, "risky")
+    compiled = g.build(FakeEvidence(verdict="failed"), checkpointer=MemorySaver())
+    paused = compiled.invoke({}, config={"configurable": {"thread_id": "ctx"}})
+    question = paused["__interrupt__"][0].value["question"]
+
+    assert "RISKY" in question and "stubbed reason" in question
+    assert "Clients reading user.email will crash." in question
+    assert "Add email_address first" in question
+    assert "aaa1" in question, "the fingerprints are in front of the approver"
+    assert "GET /users" in question
+
+
+def test_no_model_still_gives_the_approver_the_facts(monkeypatch) -> None:
+    from langgraph.checkpoint.memory import MemorySaver
+
+    monkeypatch.setattr(g, "_classify", lambda state: {"band": "unknown", "rationale": ""})
+    compiled = g.build(FakeEvidence(verdict="failed"), checkpointer=MemorySaver())
+    question = compiled.invoke({}, config={"configurable": {"thread_id": "facts"}})["__interrupt__"][0].value["question"]
+    assert "No AI explanation available" in question
+    assert "aaa1" in question and "GET /users" in question
+
+
+def test_check_explain_runs_the_same_graph_without_pausing(monkeypatch) -> None:
+    """`check --explain` and the approval question share one explanation path."""
+    from api_guard.ai import explain
+    from api_guard.policy import WaiverOutcome
+    from api_guard.results import Change, CheckResult, Status
+    from api_guard.verdict import decide
+
+    answer = _explaining(monkeypatch, "routine")
+    change = Change(id="response-required-property-removed", text="removed `email`",
+                    operation="GET", path="/users", fingerprint="abc123")
+    result = decide([CheckResult(name="breaking", status=Status.FAILED, summary="1")],
+                    [change], WaiverOutcome(), {})
+
+    markdown = explain.explain(result)
+    assert markdown == explain._render(answer, [change])
+    assert 'fingerprint: "abc123"' in markdown, "the real fingerprint, never the model's"

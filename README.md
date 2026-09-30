@@ -508,9 +508,9 @@ The AI layer is an optional install (`pip install ".[ai]"`) and runs on a
 
 | Piece | Command | What it does | Model (default) |
 |---|---|---|---|
-| **Explain** | `check --explain` | Writes "what breaks, how to migrate, draft waiver" into `report.md` | `gpt-oss-120b` |
+| **Explain** | `check --explain`, and inside `review` | Writes "what breaks, how to migrate, draft waiver" into `report.md` and the approval question | `gpt-oss-20b` for routine changes, `gpt-oss-120b` otherwise |
 | **Triage** | inside `review` | Labels a blocked change `routine` / `risky` / `unknown` for the approver | `gpt-oss-20b` |
-| **Review workflow** | `review`, `approve` | Pauses a blocked build for human sign-off (LangGraph, section 9) | uses triage |
+| **Review workflow** | `review`, `approve` (and `check --explain`, without the pause) | Runs triage and explain, then pauses a blocked build for human sign-off with the full context (LangGraph, section 9) | per step |
 | **Agent** | `ask` | Answers questions about past builds by choosing which tools to read (section 10) | `gpt-oss-20b` |
 | **MCP server** | started by `ask` | Serves build results as read-only tools | none, no AI |
 | **Web page** | `ui` | `ask` in a browser | same as `ask` |
@@ -564,9 +564,16 @@ Other safeguards:
 
 ### Where it's used
 
-LangGraph is used in **one place**: `api-guard review` and `api-guard approve`.
-`check`, `--explain` and `ask` don't use it (`ask` uses a separate small graph
-for its tool loop, see section 10).
+Every AI step that follows a verdict runs in **one LangGraph workflow**:
+triage, then explain, then (if needed) the human. It runs in two modes:
+
+| Command | Mode |
+|---|---|
+| `check --explain` | The workflow **without** the human step. Its explanation becomes the "What this means" section of `report.md` |
+| `review` / `approve` | The full workflow. A blocked build pauses for a person, who sees the same explanation |
+
+So the report and the approver always see the same explanation, from the same
+code. (`ask` has its own small loop for tool calling, see section 10.)
 
 ### Why a workflow library at all
 
@@ -581,19 +588,26 @@ process**, exactly where it paused.
 
 ```mermaid
 flowchart TD
-    S(["api-guard review --id 42"]) --> C["Run the 3 checks<br/>verdict is fixed here"]
-    C --> L["load_evidence<br/>copy verdict, changes, failures, waivers into state"]
+    S(["api-guard review --id 42<br/>or check --explain"]) --> C["Run the 3 checks<br/>verdict is fixed here"]
+    C --> L["load_evidence<br/>verdict, changes, failures, waivers,<br/>commit and branch"]
     L --> T{"classify_severity"}
     T -->|"no changes"| T1["band = routine<br/>no LLM call"]
-    T -->|"no GROQ_API_KEY"| T2["band = unknown<br/>no LLM call"]
+    T -->|"AI off / no key"| T2["band = unknown<br/>no LLM call"]
     T -->|"otherwise"| T3["LLM labels it<br/>routine / risky"]
-    T1 --> D
-    T2 --> D
-    T3 --> D
-    D{"decide<br/>rules only, ignores the band"}
+    T1 --> X
+    T2 --> X
+    T3 --> X
+    X{"explain"}
+    X -->|"no changes or AI off"| D
+    X -->|"band = routine"| X1["small model writes<br/>what breaks + migration"]
+    X -->|"band = risky / unknown"| X2["larger model writes<br/>what breaks + migration"]
+    X1 --> D
+    X2 --> D
+    D{"decide<br/>rules only, ignores band and explanation"}
     D -->|"verdict = passed"| R["render_report<br/>review.md"]
     D -->|"verdict = error<br/>blocked, nothing to approve"| R
-    D -->|"verdict = failed"| H["human_approval<br/>PAUSE, save state, exit"]
+    D -->|"check --explain<br/>never pauses"| R
+    D -->|"verdict = failed"| H["human_approval<br/>show full context, PAUSE,<br/>save state, exit"]
     H -. "later, any process:<br/>api-guard approve 42 --by sohan" .-> H2["resume with approver's name"]
     H2 --> R
     R --> END(["done"])
@@ -603,28 +617,59 @@ flowchart TD
 
 | Step | Condition | Result |
 |---|---|---|
+| classify_severity | no changes | `routine`, no model call |
+| classify_severity | AI off or no key | `unknown`, no model call |
+| explain | no changes, or AI off | skipped; the approver still gets the facts |
+| explain | band is `routine` | the small model (`gpt-oss-20b`) writes it |
+| explain | band is `risky` or `unknown` | the explain model (`gpt-oss-120b` by default) writes it |
 | decide | verdict is `failed` or `error` | `blocked = true` |
-| decide | verdict is `failed` | `needs_approval = true`: go to human_approval |
+| decide | verdict is `failed` (and running `review`) | `needs_approval = true`: go to human_approval |
 | decide | verdict is `error` | blocked, **no** approval: a tooling failure proved nothing, so there's nothing to sign off |
-| decide | verdict is `passed` | straight to the report |
+| decide | verdict is `passed`, or running `check --explain` | straight to the report |
 | human_approval | approver gives a name | recorded in `review.md` as "Approved to ship by …" |
 | approve | empty name | refused |
 | approve | review already finished, or unknown ID | refused, exit 2 |
 
+The band chooses **which model writes the explanation**, and nothing else.
+
 **The design rule, tested:** `decide` only reads the rule-based verdict. It
-never reads the model's band, even though the band sits right next to it in the
-state. A test checks this by inspecting the code, and another removes the LLM
-step entirely and confirms the decision doesn't change.
+never reads the model's band or explanation, even though both sit right next to
+it in the state. A test checks this by inspecting the code, and another removes
+the LLM step entirely and confirms the decision doesn't change.
 
 ### What is saved at each step
 
 | After step | Saved in the state |
 |---|---|
-| load_evidence | build label, verdict, list of changes, conformance failures, waivers applied |
+| load_evidence | build label, commit and branch, verdict, list of changes, conformance failures, waivers applied |
 | classify_severity | `band`, `rationale` |
+| explain | `impact`, `migration`, `severity_note`, which model wrote it, and the markdown section |
 | decide | `blocked`, `needs_approval` |
-| human_approval | `approved_by` |
+| human_approval | the exact `question` shown, and `approved_by` |
 | render_report | the final `report` text |
+
+Because the explanation is saved, an approver who answers days later sees
+exactly what was generated at build time, and nothing is paid for twice.
+
+### What the approver sees
+
+Facts first (always there, even with AI off), then the model's advice,
+labelled as such:
+
+```
+Review of this build · commit 94cf4b0 · branch demo/breaking-rename
+
+Changes (2):
+  - [ERR] GET /users: removed the required property `email` from the response
+  - [ERR] POST /users: added the new required request property `email_address`
+Fingerprints: 631dbccdc316, ea606b6ba971
+
+Risk (model's opinion): RISKY - Both changes remove or add required fields...
+What breaks (model): GET /users no longer includes `email`, so clients...
+Safer route (model): add `email_address` first while keeping `email`...
+
+Approve shipping this anyway?
+```
 
 A test runs the pause in one Python process and the approval in a
 **brand-new process** that shares only the SQLite file, and confirms the
@@ -811,8 +856,11 @@ is built to stay small:
 - **Fingerprints stay out of prompts.** The model never needs them, so they
   aren't paid for.
 - **The small model where it's enough.** Triage and the agent use
-  `gpt-oss-20b`; only the written explanation uses `gpt-oss-120b`. Each role
+  `gpt-oss-20b`. The explanation uses it too when triage says the change is
+  routine; only risky or unclassified changes get `gpt-oss-120b`. Each role
   has its own setting.
+- **Written once, reused.** The explanation is saved with the review, so the
+  approval question and `review.md` reuse it instead of asking again.
 - **Tool results capped** at 4000 characters, because every agent round
   resends the whole conversation, and **older results shortened** once the
   conversation passes about 6000 tokens.
@@ -1172,8 +1220,6 @@ Stated plainly, so nobody discovers them the hard way:
 
 - **Rejecting a review** happens only in the CI system. The LangGraph workflow
   has no reject route yet, and no "ask a question" loop for the approver.
-- **The approver sees the risk label, not the full explanation.** `--explain`
-  and the review workflow are separate paths.
 - **Approval doesn't create a waiver**, so the same break blocks again on the
   next build.
 - **Only Groq is implemented** as a provider. `llm.py` is the single place

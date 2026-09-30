@@ -48,31 +48,22 @@ class Explanation(BaseModel):
 def explain(result: RunResult) -> str | None:
     """Append an impact analysis to the report. Returns the markdown, or None.
 
+    Runs the review graph without its human step (graph.analysis_for), so
+    `check --explain` and the approval question share one explanation path:
+    triage picks the model, then the explain step writes this section.
+
     Never raises. Every failure — missing key, missing extra, provider down,
     malformed response — degrades to returning None, because the alternative is
     an advisory feature taking down a deployment gate.
     """
-    try:
-        return _explain(result)
-    except Exception:  # noqa: BLE001 - advisory only; see the module docstring
-        return None
-
-
-def _explain(result: RunResult) -> str | None:
     if result.verdict is Status.PASSED and not result.changes:
         return None  # nothing to explain
-    if not llm.available():
-        return None
+    try:
+        from api_guard.ai import graph
 
-    changes = sorted(result.changes, key=lambda c: c.severity.rank, reverse=True)
-    if not changes:
+        return graph.analysis_for(result)
+    except Exception:  # noqa: BLE001 - advisory only; see the module docstring
         return None
-
-    explanation = _ask(changes)
-    if explanation is None:
-        return None
-
-    return _render(explanation, changes[:_MAX_CHANGES])
 
 
 def _prompt(changes: list) -> str:
