@@ -147,6 +147,45 @@ def list_expiring_waivers(build_id: str, within_days: int = 30) -> list[dict]:
     return sorted(expiring, key=lambda w: w["days_left"])
 
 
+def _review_state() -> Path:
+    return Path(os.environ.get("API_GUARD_STATE", str(Path(".api-guard") / "reviews.db")))
+
+
+def get_review(review_id: str) -> dict:
+    """One saved review: status, the question the approver sees, and its audit trail.
+
+    Read-only: it reports decisions, it cannot make one. Deciding stays with a
+    named human through approve / reject.
+    """
+    from api_guard.ai import review
+
+    try:
+        for summary in review.list_reviews(state=_review_state()):
+            if summary.review_id == review_id:
+                return {**_summary_dict(summary), "audit": review.show(review_id, state=_review_state())}
+    except review.ReviewError as exc:
+        return {"error": str(exc)}
+    return {"error": f"no review {review_id!r} in {_review_state()}"}
+
+
+def list_pending_reviews() -> list[dict]:
+    """Reviews waiting for a human decision, newest first."""
+    from api_guard.ai import review
+
+    try:
+        return [
+            _summary_dict(s) for s in review.list_reviews(state=_review_state()) if s.status == "waiting"
+        ]
+    except review.ReviewError as exc:
+        return [{"error": str(exc)}]
+
+
+def _summary_dict(summary: Any) -> dict:
+    from dataclasses import asdict
+
+    return asdict(summary)
+
+
 def main() -> None:
     try:
         from mcp.server.fastmcp import FastMCP
@@ -192,6 +231,12 @@ def main() -> None:
     )
     server.add_tool(
         _wrap(list_expiring_waivers, "Waivers expiring soon, so they can be renewed or dropped.")
+    )
+    server.add_tool(
+        _wrap(get_review, "A saved review's status, the approval question, and its audit trail.")
+    )
+    server.add_tool(
+        _wrap(list_pending_reviews, "Reviews waiting for a human to approve, reject or ask a question.")
     )
 
     server.run()

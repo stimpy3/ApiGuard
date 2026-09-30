@@ -88,10 +88,51 @@ def start(
     `fail_on` and `max_waiver_days` come from api-guard.yaml, so an approval
     later waives exactly the changes that blocked, within the waiver policy.
     """
+    return _start(
+        LocalEvidence(result), state=state, review_id=review_id,
+        fail_on=fail_on, max_waiver_days=max_waiver_days,
+    )
+
+
+def start_archived(
+    build_id: str,
+    *,
+    state: Path = DEFAULT_STATE,
+    review_id: str | None = None,
+    fail_on: str = "ERR",
+    max_waiver_days: int = 90,
+) -> Outcome:
+    """Review a build that already finished, from its archived result.json.
+
+    The evidence comes from Jenkins' archived artifacts, read the same way the
+    MCP server's tools read them (McpEvidence). Useful when the approver is
+    not the pipeline: hours later, on another machine, or for a CI system
+    that could not pause.
+    """
+    from api_guard.ai import mcp_server
+    from api_guard.ai.evidence import McpEvidence
+
+    class _ArchivedReports:
+        @staticmethod
+        def get_report(build: str) -> dict:
+            return mcp_server.load_report(build)
+
+    evidence = McpEvidence(_ArchivedReports(), build_id)
+    try:
+        evidence.verdict()  # fetch now, so an unreachable Jenkins is a plain error
+    except mcp_server.ReportUnavailable as exc:
+        raise ReviewError(str(exc)) from exc
+    return _start(
+        evidence, state=state, review_id=review_id or f"build-{build_id}",
+        fail_on=fail_on, max_waiver_days=max_waiver_days,
+    )
+
+
+def _start(evidence, *, state: Path, review_id: str | None, fail_on: str, max_waiver_days: int) -> Outcome:
     review_id = review_id or uuid.uuid4().hex[:8]
 
     with _checkpointer(state) as saver:
-        compiled = workflow.build(LocalEvidence(result), checkpointer=saver)
+        compiled = workflow.build(evidence, checkpointer=saver)
         if compiled is None:
             raise ReviewError("review needs the AI extra: pip install 'api-guard[ai]'")
 
@@ -157,6 +198,117 @@ def ask(review_id: str, question: str, *, state: Path = DEFAULT_STATE) -> Outcom
         return {"decision": "question", "question": question}
 
     return _resume(review_id, state, check)
+
+
+@dataclass
+class Summary:
+    """One review, as `review list` and the web inbox show it."""
+
+    review_id: str
+    status: str  # "waiting" | "approved" | "rejected" | "no decision needed"
+    verdict: str = ""
+    band: str = ""
+    changes: int = 0
+    commit: str = ""
+    question: str = ""
+    questions_asked: int = 0
+    started: str = ""
+    updated: str = ""
+
+
+def _status(values: dict, waiting: bool) -> str:
+    if waiting:
+        return "waiting"
+    return {"approve": "approved", "reject": "rejected"}.get(values.get("decision", ""), "no decision needed")
+
+
+def _summary(review_id: str, snapshot, history: list) -> Summary:
+    values = snapshot.values
+    waiting = bool(snapshot.next)
+    return Summary(
+        review_id=review_id,
+        status=_status(values, waiting),
+        verdict=values.get("verdict", ""),
+        band=values.get("band", ""),
+        changes=len(values.get("changes") or []),
+        commit=str((values.get("context") or {}).get("commit", ""))[:7],
+        question=workflow.approval_question(values) if waiting else "",
+        questions_asked=len(values.get("qa") or []),
+        started=history[-1].created_at if history else "",
+        updated=history[0].created_at if history else "",
+    )
+
+
+def list_reviews(*, state: Path = DEFAULT_STATE) -> list[Summary]:
+    """Every review in the state file, waiting ones first, newest first."""
+    if not state.exists():
+        return []
+    with _checkpointer(state) as saver:
+        compiled = workflow.build(None, checkpointer=saver)
+        ids = []
+        for item in saver.list(None):
+            thread = item.config["configurable"]["thread_id"]
+            if thread not in ids:
+                ids.append(thread)
+        summaries = []
+        for review_id in ids:
+            config = _config(review_id)
+            summaries.append(_summary(review_id, compiled.get_state(config), list(compiled.get_state_history(config))))
+    newest_first = sorted(summaries, key=lambda s: s.updated, reverse=True)
+    return sorted(newest_first, key=lambda s: s.status != "waiting")  # stable: waiting on top
+
+
+def show(review_id: str, *, state: Path = DEFAULT_STATE) -> str:
+    """The audit trail of one review, as text.
+
+    Built from the saved checkpoints: what the evidence was, what the model
+    said, every question and answer, and who decided what, when. Nothing here
+    is regenerated.
+    """
+    if not state.exists():
+        raise ReviewError(f"no review state at {state}")
+    with _checkpointer(state) as saver:
+        compiled = workflow.build(None, checkpointer=saver)
+        config = _config(review_id)
+        snapshot = compiled.get_state(config)
+        if not snapshot.values:
+            raise ReviewError(f"no review {review_id!r} in {state}")
+        history = list(compiled.get_state_history(config))
+
+    v = snapshot.values
+    s = _summary(review_id, snapshot, history)
+    context = v.get("context") or {}
+    lines = [
+        f"Review {review_id}: {s.status.upper()}",
+        f"  started  {s.started}",
+        f"  updated  {s.updated}",
+        f"  commit   {context.get('commit', '-')}   branch {context.get('branch', '-')}",
+        "",
+        f"Evidence (rules): verdict {v.get('verdict')}, {s.changes} change(s)",
+    ]
+    for c in v.get("changes") or []:
+        lines.append(f"  - [{c.get('severity', 'ERR')}] {c.get('operation') or ''} {c.get('path') or ''}: "
+                     f"{c.get('text')} (fingerprint {c.get('fingerprint')})")
+    lines += ["", f"Triage (model): {v.get('band', '-')} - {v.get('rationale', '')}"]
+    if v.get("impact"):
+        lines += [f"Explanation (model: {v.get('explain_model')}):",
+                  f"  What breaks: {v.get('impact')}",
+                  f"  Safer route: {v.get('migration')}"]
+    for i, item in enumerate(v.get("qa") or [], 1):
+        tools = f" [tools: {', '.join(item['tools'])}]" if item.get("tools") else ""
+        lines += ["", f"Question {i}: {item.get('question')}", f"  Answer (model){tools}: {item.get('answer')}"]
+    lines.append("")
+    if v.get("decision") == "approve":
+        lines += [f"Decision: APPROVED by {v.get('decided_by')}", f"  reason:  {v.get('reason')}",
+                  f"  waiver expires {v.get('expires')}"]
+    elif v.get("decision") == "reject":
+        lines += [f"Decision: REJECTED by {v.get('decided_by')}", f"  reason: {v.get('reason')}"]
+    elif s.status == "waiting":
+        lines.append(f"Decision: waiting ({workflow.MAX_QUESTIONS - s.questions_asked} question(s) left)")
+    else:
+        lines.append("Decision: none needed (the build was not blocked)")
+    lines.append(f"\n{len(history)} saved checkpoint(s).")
+    return "\n".join(lines)
 
 
 def _resume(review_id: str, state: Path, payload) -> Outcome:

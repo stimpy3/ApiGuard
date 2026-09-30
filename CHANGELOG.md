@@ -38,6 +38,28 @@ Semver tags mean nothing to a consumer without this file: someone pinning
 - Shared rules now also say a required request field breaks clients whenever
   it's introduced.
 
+### Reviews after the fact
+
+- `review --build N [--job ...]` runs the review workflow on an archived
+  Jenkins build, with its `result.json` as the evidence (McpEvidence, unused
+  until now). The review id is `build-N`.
+- Two new read-only MCP tools, `list_pending_reviews` and `get_review`, so
+  our agent can answer "what's waiting for approval, and why?". They report
+  decisions; they cannot make one.
+
+### Deciding from Jenkins, the terminal or the browser
+
+- `review list` shows every saved review, waiting ones first; `review show ID`
+  prints its audit trail from the saved checkpoints (evidence, the model's
+  label and explanation, every question and answer, the decision, who, when).
+- The sample Jenkinsfile's approval is one form with a decision dropdown
+  (approve / reject / question), NAME, TEXT and EXPIRES_IN, looping until a
+  decision. A question runs `ask-review` and shows the answer in the next
+  form; input api-guard refuses brings the form back instead of failing the
+  build; Abort or the timeout is recorded as a rejection.
+- `api-guard ui` gains a "Pending reviews" tab with approve / reject / ask
+  buttons, for CI systems that cannot pause a job.
+
 ### Approve, reject or ask
 
 - A paused review now has three ways forward, each a separate command that

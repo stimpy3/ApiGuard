@@ -118,6 +118,27 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="SQLite file holding paused reviews (default: .api-guard/reviews.db).",
     )
+    review.add_argument(
+        "action",
+        nargs="?",
+        choices=["show", "list"],
+        help=(
+            "Instead of running the checks: `review list` shows every saved "
+            "review, waiting ones first; `review show ID` prints one review's "
+            "audit trail."
+        ),
+    )
+    review.add_argument("target", nargs="?", help="The review id, for `review show`.")
+    review.add_argument(
+        "--build",
+        default=None,
+        metavar="N",
+        help=(
+            "Review an archived Jenkins build instead of running the checks: "
+            "the evidence is its result.json (JENKINS_URL / JENKINS_JOB, or --job)."
+        ),
+    )
+    review.add_argument("--job", default=None, help="Jenkins job path, for --build.")
 
     approve = sub.add_parser(
         "approve",
@@ -199,6 +220,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command in ("approve", "reject", "ask-review"):
         return _decide(args)
+
+    if args.command == "review" and args.action:
+        if args.action == "show" and not args.target:
+            parser.error("review show needs a review id: api-guard review show 42")
+        return _review_query(args.action, args.target, args.state)
+
+    if args.command == "review" and args.build:
+        return _review_archived(args)
 
     if args.command in ("check", "review"):
         selected = None
@@ -558,6 +587,68 @@ def _decide(args) -> int:
         if outcome.waiver_snippet:
             print("\nAdd this to waivers.yaml in the pull request, so the next build passes too:\n")
             print(outcome.waiver_snippet)
+    return 0
+
+
+def _review_archived(args) -> int:
+    """`review --build N`: the review workflow on an archived Jenkins build.
+
+    No checks run: the verdict is the one that build already reached. Exit 0
+    once the review is saved (paused or complete), 2 if it could not start.
+    """
+    import os
+
+    if args.job:
+        os.environ["JENKINS_JOB"] = args.job
+    try:
+        from api_guard.ai import review as workflow
+    except ImportError:
+        print("api-guard: review needs the AI extra: pip install 'api-guard[ai]'", file=sys.stderr)
+        return EXIT_TOOL_ERROR
+
+    state = args.state or workflow.DEFAULT_STATE
+    try:
+        outcome = workflow.start_archived(args.build, state=state, review_id=args.review_id)
+    except workflow.ReviewError as exc:
+        print(f"api-guard: review not started: {exc}", file=sys.stderr)
+        return EXIT_TOOL_ERROR
+
+    _reconfigure_stdout()
+    if outcome.paused:
+        print(f"Review {outcome.review_id} (archived build {args.build}) is waiting for a decision.\n")
+        print(outcome.question)
+        _print_decision_help(outcome.review_id, state)
+    else:
+        print(f"Review {outcome.review_id} complete, no decision needed:\n\n{outcome.report}")
+    return 0
+
+
+def _review_query(action: str, review_id: str | None, state: Path | None) -> int:
+    """`review list` and `review show ID`: read-only views of the saved reviews."""
+    try:
+        from api_guard.ai import review as workflow
+    except ImportError:
+        print("api-guard: review needs the AI extra: pip install 'api-guard[ai]'", file=sys.stderr)
+        return EXIT_TOOL_ERROR
+
+    state = state or workflow.DEFAULT_STATE
+    _reconfigure_stdout()
+    try:
+        if action == "show":
+            print(workflow.show(review_id, state=state))
+            return 0
+        reviews = workflow.list_reviews(state=state)
+    except workflow.ReviewError as exc:
+        print(f"api-guard: {exc}", file=sys.stderr)
+        return EXIT_TOOL_ERROR
+
+    if not reviews:
+        print(f"No reviews in {state}.")
+        return 0
+    print(f"{'ID':<10} {'STATUS':<19} {'VERDICT':<8} {'BAND':<8} {'CHANGES':>7}  {'COMMIT':<8} UPDATED")
+    for r in reviews:
+        print(f"{r.review_id:<10} {r.status:<19} {r.verdict:<8} {r.band:<8} {r.changes:>7}  "
+              f"{r.commit or '-':<8} {r.updated[:19]}")
     return 0
 
 

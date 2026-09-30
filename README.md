@@ -513,7 +513,7 @@ The AI layer is an optional install (`pip install ".[ai]"`) and runs on a
 | **Review workflow** | `review`, `approve` (and `check --explain`, without the pause) | Runs triage and explain, then pauses a blocked build for human sign-off with the full context (LangGraph, section 9) | per step |
 | **Agent** | `ask` | Answers questions about past builds by choosing which tools to read (section 10) | `gpt-oss-20b` |
 | **MCP server** | started by `ask` | Serves build results as read-only tools | none, no AI |
-| **Web page** | `ui` | `ask` in a browser | same as `ask` |
+| **Web page** | `ui` | `ask` in a browser, plus a "Pending reviews" inbox with approve / reject / ask buttons | same as `ask` |
 
 ### One shared model layer (`llm.py`)
 
@@ -570,10 +570,19 @@ triage, then explain, then (if needed) the human. It runs in two modes:
 | Command | Mode |
 |---|---|
 | `check --explain` | The workflow **without** the human step. Its explanation becomes the "What this means" section of `report.md` |
-| `review` / `approve` | The full workflow. A blocked build pauses for a person, who sees the same explanation |
+| `review` / `approve` / `reject` / `ask-review` | The full workflow. A blocked build pauses for a person, who sees the same explanation |
+| `review --build N` | The full workflow on an **archived** Jenkins build: the evidence comes from its `result.json` instead of a live run |
 
 So the report and the approver always see the same explanation, from the same
-code. (`ask` has its own small loop for tool calling, see section 10.)
+code. (`ask` has its own small loop for tool calling, see section 10; an
+approver's question runs that same loop inside this workflow.)
+
+**Why not just Jenkins' `input` step?** Jenkins is only the button. The review
+itself lives in api-guard: it works the same from Jenkins, a terminal or the
+web page; it shows the approver the full context; our agent answers their
+questions; a decision becomes a waiver or a fix checklist; and the saved
+checkpoints are an audit trail of what the approver was shown when they
+decided.
 
 ### Why a workflow library at all
 
@@ -776,7 +785,7 @@ flowchart LR
         A2["the same loop<br/>+ another free provider"]
         A3["a local model<br/>e.g. Ollama"]
     end
-    AG <-->|"MCP: one standard protocol"| S["api-guard MCP server<br/>6 read-only tools"]
+    AG <-->|"MCP: one standard protocol"| S["api-guard MCP server<br/>8 read-only tools"]
     S --> J["Jenkins archived results<br/>result.json"]
 ```
 
@@ -790,9 +799,9 @@ flowchart LR
 - **Adding a tool** means adding it to the server. Every agent sees it
   automatically, with no change to agent code.
 
-api-guard's MCP server (`python -m api_guard.ai.mcp_server`) offers six
-**read-only** tools. Each reads the `result.json` that Jenkins archived for a
-build:
+api-guard's MCP server (`python -m api_guard.ai.mcp_server`) offers eight
+**read-only** tools. Six read the `result.json` that Jenkins archived for a
+build; two read the saved reviews:
 
 | Tool | Returns |
 |---|---|
@@ -801,10 +810,14 @@ build:
 | `get_spec_diff` | the breaking changes oasdiff found |
 | `get_conformance_results` | where the running API disagreed with the spec |
 | `get_freshness_result` | whether the committed spec matched the code |
-| `list_expiring_waivers` | waivers expiring within N days (default 30) |
+| `list_expiring_waivers` | waivers expiring within N days (default 30), and expired ones |
+| `list_pending_reviews` | reviews waiting for a human decision |
+| `get_review` | one review's status, the approval question, and its audit trail |
 
 The build ID `local` reads `api-guard-report/result.json` in the current folder
-instead of Jenkins.
+instead of Jenkins. The review tools read `API_GUARD_STATE` (default
+`.api-guard/reviews.db`). None of them can decide anything: deciding stays with
+a named person through `approve` / `reject`.
 
 **Why MCP instead of calling the functions directly:** it keeps the three parts
 of the agent separate, so each can change without touching the others:
@@ -1014,9 +1027,12 @@ BUILD AND GATE
      exit 2 → stop (setup problem, no approval offered)
 
 APPROVAL (only if blocked)
-6. Wait up to 24 h for a human:
-     Approve + name            → api-guard approve → go to SHIP
-     Abort / no name / timeout → stop, nothing shipped
+6. Show one form (up to 24 h in total), with a decision dropdown:
+     question  → api-guard ask-review → the answer shows in the next form
+     approve   → api-guard approve    → review.md gets the waiver → go to SHIP
+     reject    → api-guard reject     → stop, fix checklist in review.md
+     bad input → the form comes back with a note (no name, short reason, ...)
+     Abort / timeout → recorded as a rejection, stop, nothing shipped
 
 SHIP
 7. Push the image to Docker Hub (only if the credential exists)
@@ -1038,15 +1054,33 @@ flowchart TD
     E -->|"exit 1 + approval-request.md"| S2
     E -->|"exit 1, no review started"| F1["Fail"]
     E -->|"exit 2"| F2["Fail: tooling problem.<br/>Approval NOT offered"]
-    subgraph S2["Approval (no executor)"]
-        I["Input form shows the question<br/>+ APPROVED_BY field"]
+    subgraph S2["Approval (no executor while waiting)"]
+        I["Form: the full context<br/>+ DECISION, NAME, TEXT, EXPIRES_IN"]
+        I -->|"question"| QA["api-guard ask-review<br/>(executor for seconds)"]
+        QA -->|"answer added"| I
+        I -->|"bad input"| I
     end
-    I -->|"Approve + name"| S3
-    I -->|"Abort, empty name, or 24 h timeout"| F3["Fail. Nothing shipped"]
+    I -->|"approve"| AP["api-guard approve<br/>review.md gets the waiver"]
+    AP --> S3
+    I -->|"reject"| F3["api-guard reject<br/>Fail, fix checklist"]
+    I -->|"Abort or 24 h timeout"| F4["recorded as rejected<br/>Fail. Nothing shipped"]
     subgraph S3["Ship (uses an executor)"]
-        R["api-guard approve --by name<br/>(only after approval)"] --> P["Publish"] --> Q["Deploy"] --> T["Smoke test"]
+        P["Publish"] --> Q["Deploy"] --> T["Smoke test"]
     end
 ```
+
+The form's fields:
+
+| Field | Used for |
+|---|---|
+| `DECISION` | `approve`, `reject` or `question` |
+| `NAME` | Required to approve or reject. Recorded in `review.md` and in the waiver |
+| `TEXT` | The reason (at least 10 characters to approve; it becomes the waiver's reason), or the question |
+| `EXPIRES_IN` | Approve only: days until the waiver expires (default 30, at most `max_waiver_days`) |
+
+Whatever a person types reaches the shell only as environment variables, never
+pasted into the script. If api-guard refuses an input, the form simply comes
+back with a note, rather than failing the build.
 
 Things worth knowing:
 
@@ -1127,7 +1161,10 @@ The action runs the `:1` image and then:
 Other inputs: `only` (which checks), `version` (image tag, default `1`).
 
 GitHub Actions can't pause a job for days and wait for a person, so there's no
-approval step there. Use a waiver, or approve with the CLI.
+approval step inside the workflow. A breaking change there is handled with a
+waiver in the pull request. If you run `review` somewhere with a shared state
+file, a person can decide with the CLI (`approve` / `reject` / `ask-review`) or
+the web page's "Pending reviews" tab.
 
 ---
 
@@ -1164,7 +1201,7 @@ Or skip installing entirely and use Docker (section 13).
 | `ask` | `api-guard ask "why did build 42 fail?"` | Investigating a Jenkins build |
 | `ask --job` | `api-guard ask "did build 1 fail conformance?" --job 'sample-api-local/job/main'` | The build is in another Jenkins job (branch names with `/` need `%252F`) |
 | `ask` (local) | `api-guard ask "what failed in build local?"` | Asking about `result.json` in the current folder |
-| `ui` | `api-guard ui` | `ask` in a browser, at http://localhost:8501 |
+| `ui` | `api-guard ui` | A browser page at http://localhost:8501 with two tabs: `ask`, and "Pending reviews" (approve / reject / ask buttons) |
 
 ### Approval
 
@@ -1174,6 +1211,9 @@ Or skip installing entirely and use Docker (section 13).
 | `ask-review` | `api-guard ask-review 42 "does this break the mobile app?"` | Before deciding: our agent answers from the saved review (max 5 per review) |
 | `approve` | `api-guard approve 42 --by sohan --reason "Both clients migrated, PROD-142" --expires-in 30` | Ship the break; `review.md` gets the waiver entries to commit |
 | `reject` | `api-guard reject 42 --by lead --reason "Billing still reads email"` | Don't ship; `review.md` gets who, why and a fix checklist |
+| `review list` | `api-guard review list` | See every saved review, waiting ones first |
+| `review show` | `api-guard review show 42` | The audit trail: evidence, the model's label and explanation, every question and answer, who decided what and when |
+| `review --build` | `api-guard review --build 42 --job sample-api` | Review a build that already finished, from Jenkins' archived `result.json` (the review id is `build-42`) |
 | `--state` | `api-guard review --id 42 --state /shared/reviews.db` | The saved review must outlive the workspace (use the same path for every command) |
 
 ### MCP server
@@ -1246,7 +1286,7 @@ api-guard/
 │       ├── review.py       review / approve, SQLite state
 │       ├── evidence.py     where the workflow gets its facts
 │       ├── agent.py        ask: the tool-calling loop
-│       ├── mcp_server.py   the 6 read-only tools
+│       ├── mcp_server.py   the 8 read-only tools
 │       └── ui.py           the web page
 ├── tests/                  includes the "AI can't touch the verdict" tests
 ├── action.yml              the GitHub Action

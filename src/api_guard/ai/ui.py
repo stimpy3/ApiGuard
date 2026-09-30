@@ -1,14 +1,20 @@
-"""A small web page for `api-guard ask`.
+"""A small web page for `api-guard ask` and for pending reviews.
 
     api-guard ui        # opens http://localhost:8501
 
-Deliberately thin: everything it shows comes from agent.ask(), the same call
-the CLI makes, so the page and the terminal cannot disagree. It adds three
-things a terminal does badly — the investigation appearing step by step, the
-model's confidence and the grounding checks shown next to the answer rather
-than below it, and a history of the session's questions.
+Deliberately thin: everything it shows comes from the same calls the CLI
+makes (agent.ask, and review.approve / reject / ask), so the page, the
+terminal and the Jenkins form cannot disagree.
 
-Like the CLI, it reads archived results and cannot change a verdict.
+Two tabs:
+- Ask about a build: the investigation appearing step by step, the model's
+  confidence and grounding checks next to the answer, and the session's
+  history.
+- Pending reviews: every review waiting for a decision, with the full context
+  and approve / reject / ask buttons. This is the approval route for CI
+  systems that cannot pause a job, like GitHub Actions.
+
+Like the CLI, nothing here can change a verdict.
 """
 
 from __future__ import annotations
@@ -86,6 +92,72 @@ def main() -> None:
     )
 
     url, job = _settings()
+    ask_tab, inbox_tab = st.tabs(["Ask about a build", "Pending reviews"])
+    with inbox_tab:
+        _inbox()
+    with ask_tab:
+        _ask_tab(url, job)
+
+
+def _inbox() -> None:
+    """Reviews waiting for a decision, with the same three choices as the CLI.
+
+    Calls review.approve / reject / ask directly, so the page, the CLI and the
+    Jenkins form all resume the same saved graph with the same validation.
+    """
+    from pathlib import Path
+
+    from api_guard.ai import review
+
+    st.session_state.setdefault("state_path", os.environ.get("API_GUARD_STATE", str(review.DEFAULT_STATE)))
+    state = Path(st.text_input("Review state file", key="state_path"))
+    try:
+        reviews = review.list_reviews(state=state)
+    except review.ReviewError as exc:
+        st.error(str(exc))
+        return
+
+    waiting = [r for r in reviews if r.status == "waiting"]
+    if not waiting:
+        st.info("No reviews are waiting for a decision.")
+    for r in waiting:
+        title = f"Review {r.review_id} · {r.changes} change(s)" + (f" · commit {r.commit}" if r.commit else "")
+        with st.expander(title, expanded=True):
+            st.code(r.question, language=None, wrap_lines=True)
+            rid = r.review_id
+            name = st.text_input("Your name", key=f"name-{rid}")
+            text = st.text_area("Reason (approve or reject), or your question", key=f"text-{rid}")
+            days = st.number_input("Waiver expires in (days, approve only)", 1, 365, 30, key=f"days-{rid}")
+            approve, reject, ask = st.columns(3)
+            try:
+                if approve.button("Approve", key=f"approve-{rid}", type="primary"):
+                    done = review.approve(rid, name, reason=text, expires_in_days=int(days), state=state)
+                    st.success(f"Approved by {done.approved_by}. Commit this to waivers.yaml "
+                               "so the next build passes without approval:")
+                    st.code(done.waiver_snippet or "(nothing to waive)", language="yaml")
+                if reject.button("Reject", key=f"reject-{rid}"):
+                    done = review.reject(rid, name, reason=text, state=state)
+                    st.warning(f"Rejected by {name}. Next steps:")
+                    st.markdown("\n".join(f"{i}. {item}" for i, item in enumerate(done.checklist, 1)))
+                if ask.button("Ask", key=f"ask-{rid}"):
+                    with st.spinner("Our agent is looking…"):
+                        done = review.ask(rid, text, state=state)
+                    st.markdown(f"**Answer:** {done.answer}")
+                    st.caption(agent.Answer.CAUTION)
+            except review.ReviewError as exc:
+                st.error(str(exc))
+
+    decided = [r for r in reviews if r.status != "waiting"]
+    if decided:
+        st.subheader("Decided")
+        st.dataframe(
+            [{"id": r.review_id, "status": r.status, "verdict": r.verdict, "band": r.band,
+              "changes": r.changes, "commit": r.commit, "updated": r.updated[:19]} for r in decided],
+            hide_index=True,
+        )
+
+
+def _ask_tab(url: str, job: str) -> None:
     history: list[dict] = st.session_state.setdefault("history", [])
 
     for entry in history:

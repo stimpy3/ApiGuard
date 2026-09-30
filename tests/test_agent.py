@@ -233,13 +233,15 @@ def test_mcp_server_advertises_real_tool_inputs() -> None:
             return {t.name: set(t.args) for t in await load_mcp_tools(session)}
 
     found = asyncio.run(schemas())
-    assert set(found) == {
-        "get_report", "get_spec_diff", "get_conformance_results",
-        "get_freshness_result", "get_build_context", "list_expiring_waivers",
+    expected = {
+        "get_report": {"build_id"}, "get_spec_diff": {"build_id"},
+        "get_conformance_results": {"build_id"}, "get_freshness_result": {"build_id"},
+        "get_build_context": {"build_id"}, "list_expiring_waivers": {"build_id", "within_days"},
+        "get_review": {"review_id"}, "list_pending_reviews": set(),
     }
+    assert set(found) == set(expected)
     for name, args in found.items():
-        assert "build_id" in args, f"{name} advertises {sorted(args)}"
-        assert "args" not in args and "kwargs" not in args
+        assert args == expected[name], f"{name} advertises {sorted(args)}"
 
 
 @pytest.mark.parametrize("line", [

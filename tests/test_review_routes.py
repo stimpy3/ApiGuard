@@ -172,3 +172,84 @@ def test_with_ai_off_a_question_still_gets_an_honest_reply(paused: Path) -> None
     outcome = review.ask("42", "What breaks?", state=paused)
     assert "AI is off" in outcome.answer
     assert outcome.paused
+
+
+# --- phase 5: archived builds and the MCP review tools -----------------------
+
+
+def test_archived_build_is_reviewed_from_its_result_json(tmp_path: Path, monkeypatch) -> None:
+    """review --build N: the same graph, fed by McpEvidence instead of a live run."""
+    from api_guard.ai import mcp_server
+
+    archived = _blocked_result().model_dump(mode="json")
+    monkeypatch.setattr(mcp_server, "load_report", lambda build: archived)
+
+    state = tmp_path / "reviews.db"
+    outcome = review.start_archived("17", state=state)
+    assert outcome.paused and outcome.review_id == "build-17"
+    assert "build 17 (via MCP)" in outcome.question
+    assert "abc123" in outcome.question and "commit 94cf4b0" in outcome.question
+
+    done = review.approve("build-17", "sohan", reason=REASON, state=state)
+    assert "abc123" in done.waiver_snippet
+
+
+def test_archived_build_that_cannot_be_fetched_is_a_plain_error(tmp_path: Path, monkeypatch) -> None:
+    from api_guard.ai import mcp_server
+
+    def unreachable(build):
+        raise mcp_server.ReportUnavailable("Could not reach Jenkins")
+
+    monkeypatch.setattr(mcp_server, "load_report", unreachable)
+    with pytest.raises(review.ReviewError, match="Could not reach Jenkins"):
+        review.start_archived("17", state=tmp_path / "reviews.db")
+
+
+def test_mcp_tools_report_reviews_but_cannot_decide(paused: Path, monkeypatch) -> None:
+    from api_guard.ai import mcp_server
+
+    monkeypatch.setenv("API_GUARD_STATE", str(paused))
+    [pending] = mcp_server.list_pending_reviews()
+    assert pending["review_id"] == "42" and pending["status"] == "waiting"
+
+    detail = mcp_server.get_review("42")
+    assert "Review 42: WAITING" in detail["audit"]
+    assert "error" in mcp_server.get_review("nope")
+
+    review.approve("42", "sohan", reason=REASON, state=paused)
+    assert mcp_server.list_pending_reviews() == [], "decided reviews drop off the pending list"
+
+
+# --- audit trail and list ----------------------------------------------------
+
+
+def test_list_puts_waiting_reviews_first(paused: Path) -> None:
+    review.start(_blocked_result(), state=paused, review_id="43")
+    review.reject("43", "lead", reason="not this time", state=paused)
+
+    rows = review.list_reviews(state=paused)
+    assert [(r.review_id, r.status) for r in rows] == [("42", "waiting"), ("43", "rejected")]
+    assert rows[0].commit == "94cf4b0" and rows[0].changes == 2
+    assert "Approve (ships this build" in rows[0].question
+
+
+def test_show_is_the_audit_trail(paused: Path) -> None:
+    review.ask("42", "What breaks?", state=paused)
+    review.approve("42", "sohan", reason=REASON, state=paused)
+
+    trail = review.show("42", state=paused)
+    assert "Review 42: APPROVED" in trail
+    assert "fingerprint abc123" in trail
+    assert "Question 1: What breaks?" in trail
+    assert f"reason:  {REASON}" in trail
+    assert "saved checkpoint(s)" in trail
+
+
+def test_cli_review_show_and_list(paused: Path, capsys) -> None:
+    from api_guard import cli
+
+    assert cli.main(["review", "list", "--state", str(paused)]) == 0
+    assert "42" in capsys.readouterr().out
+    assert cli.main(["review", "show", "42", "--state", str(paused)]) == 0
+    assert "Review 42: WAITING" in capsys.readouterr().out
+    assert cli.main(["review", "show", "nope", "--state", str(paused)]) == 2
