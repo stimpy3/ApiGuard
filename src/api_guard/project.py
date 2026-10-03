@@ -173,6 +173,81 @@ def _nest_swagger(root: Path) -> Framework | None:
     )
 
 
+# --- when there is no spec at all ------------------------------------------------
+
+# How to start producing an OpenAPI spec, per stack. Shown by `init` when a
+# project has no spec and no generator, so the user gets the exact next step
+# for what they already use instead of a generic "add a spec".
+# Each entry is a list of lines; lines starting with "$ " are commands.
+_HOW_TO_ADD = {
+    "Express (Node.js)": [
+        "Document your routes with swagger-jsdoc:",
+        "$ npm install swagger-jsdoc",
+        "Add a script that builds the spec from your route comments and saves it",
+        "(it calls swaggerJsdoc(options) and prints JSON.stringify(spec)):",
+        "$ node scripts/export-openapi.js > openapi.json",
+    ],
+    "NestJS": [
+        "Add @nestjs/swagger:",
+        "$ npm install @nestjs/swagger",
+        "Add a small script that creates the app and prints",
+        "SwaggerModule.createDocument(app, config) as JSON into openapi.json.",
+    ],
+    "Flask": [
+        "Add flask-smorest (or apispec) to describe your endpoints, then save the spec:",
+        "$ pip install flask-smorest",
+        "$ flask openapi write openapi.json",
+    ],
+    "Django": [
+        "Add drf-spectacular, then generate the spec:",
+        "$ pip install drf-spectacular",
+        "$ python manage.py spectacular --file openapi.yaml",
+        "(init will then also set this up as the freshness command)",
+    ],
+    "Spring Boot": [
+        "Add springdoc-openapi to your build (springdoc-openapi-starter-webmvc-ui),",
+        "start the app, then save the spec:",
+        "$ curl -fsS http://localhost:8080/v3/api-docs > openapi.json",
+    ],
+    "Python": [
+        "If this is a FastAPI app, init needs `app = FastAPI(...)` in a .py file.",
+        "Otherwise add an OpenAPI tool for your framework and save openapi.yaml.",
+    ],
+}
+
+_GENERIC = [
+    "Write or generate an OpenAPI spec for your API. Most frameworks have a tool",
+    "(swagger-jsdoc, springdoc, drf-spectacular, FastAPI built-in, ...).",
+    "Commit it as openapi.yaml or openapi.json.",
+]
+
+
+def stack(root: Path) -> str | None:
+    """The app's framework family, even when no OpenAPI tool is installed."""
+    package = _read(root / "package.json")
+    if "@nestjs/core" in package:
+        return "NestJS"
+    if '"express"' in package:
+        return "Express (Node.js)"
+    build = _read(root / "pom.xml") + _read(root / "build.gradle") + _read(root / "build.gradle.kts")
+    if "spring-boot" in build:
+        return "Spring Boot"
+    deps = _python_deps(root)
+    if "django" in deps or (root / "manage.py").is_file():
+        return "Django"
+    if "flask" in deps:
+        return "Flask"
+    if deps.strip():
+        return "Python"
+    return None
+
+
+def how_to_add_a_spec(root: Path) -> tuple[str | None, list[str]]:
+    """(detected stack, the lines of the exact steps to start producing a spec)."""
+    found = stack(root)
+    return found, list(_HOW_TO_ADD.get(found, _GENERIC))
+
+
 # --- repository ----------------------------------------------------------------
 
 

@@ -30,11 +30,37 @@ from api_guard import project as detect_project
 GENERATED_SPEC = "api-guard-generated.json"
 _GITIGNORE_LINES = ("api-guard-report/", ".api-guard/", GENERATED_SPEC)
 
+# init's exit codes: 0 set up; 3 nothing written, because the project has no
+# OpenAPI spec yet and no way to generate one. Distinct from check's 1 and 2,
+# so a caller (CI, an editor extension) can show "add a spec first" as a step
+# to take rather than as an error.
+NEEDS_SPEC = 3
+
 
 def run(root: Path, *, ci: str = "auto", force: bool = False, dry_run: bool = False) -> int:
     found = detect_project.detect(root)
     framework = found.framework
     cmd = framework.generate_cmd if framework else None
+
+    if found.spec is None and cmd is None:
+        # Nothing to guard yet. Writing a config that points at a file that
+        # doesn't exist would be half a setup; say exactly what to do instead.
+        stack, steps = detect_project.how_to_add_a_spec(found.root)
+        print("api-guard init\n")
+        print("  No OpenAPI spec found, and no way to generate one was detected.")
+        print("  api-guard checks your API's OpenAPI spec, so it needs one first.\n")
+        if stack:
+            print(f"  Detected: {stack}")
+        if framework and framework.note:
+            print(f"  {framework.note}")
+        print("\n  Next:")
+        for i, line in enumerate(steps):
+            prefix = "    1. " if i == 0 else "       "
+            text = f"    {line[2:]}" if line.startswith("$ ") else line
+            print(prefix + text)
+        print("    2. Run `api-guard init` again: it will find the spec and finish the setup.")
+        print("\n  Nothing was written.")
+        return NEEDS_SPEC
 
     spec_rel = found.spec.relative_to(found.root).as_posix() if found.spec else (
         "openapi.json" if cmd else "openapi.yaml"

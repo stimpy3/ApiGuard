@@ -31,6 +31,10 @@ API contract: OK
   not checked: conformance (no runtime section configured)
 ```
 
+**No OpenAPI spec yet?** (Common in Express/MERN apps.) `init` notices, writes
+nothing, and prints the exact steps for your stack, e.g. for Express: add
+`swagger-jsdoc` and save `openapi.json`. Then run `init` again.
+
 **Who makes what:** your framework produces the spec; `init` writes
 `api-guard.yaml`, `waivers.yaml` and the GitHub workflow (or prints a Jenkins
 stage to paste); api-guard does everything else on each run. The only thing a
@@ -157,6 +161,29 @@ your project and fills it in where it can:
 | Anything else | No command; freshness stays off until you add one |
 
 It never guesses: a wrong command would make freshness a permanent false alarm.
+
+**When the project has no spec at all**, `init` does nothing half-way. It
+recognises the stack even without any OpenAPI tool installed, prints the exact
+next step for it, writes **nothing**, and exits with code `3`:
+
+```mermaid
+flowchart TD
+    A["api-guard init"] --> B{"OpenAPI spec<br/>in the repo?"}
+    B -->|"yes"| C["Use it: write api-guard.yaml,<br/>waivers.yaml, CI setup"]
+    B -->|"no"| D{"Can init generate one?<br/>(FastAPI, drf-spectacular)"}
+    D -->|"yes"| E["Write the setup, and print the<br/>one command that creates the spec"]
+    D -->|"no"| F["Write nothing. Print the steps<br/>for the detected stack. Exit 3"]
+    F -.->|"after adding a spec"| A
+```
+
+| Detected stack | What init tells you to add |
+|---|---|
+| Express (MERN, …) | `swagger-jsdoc`, plus a script that saves `openapi.json` |
+| NestJS | `@nestjs/swagger`, plus a script that saves the document |
+| Flask | `flask-smorest`, then `flask openapi write openapi.json` |
+| Django | `drf-spectacular`, then `python manage.py spectacular --file openapi.yaml` |
+| Spring Boot | `springdoc-openapi`, then fetch `/v3/api-docs` |
+| Anything else | Write or generate a spec and commit it as `openapi.yaml` / `openapi.json` |
 
 ---
 
@@ -1261,6 +1288,9 @@ Or skip installing entirely and use Docker (section 13).
 | `init --dry-run` | `api-guard init --dry-run` | See what it would write, without writing |
 | `init --ci` | `api-guard init --ci jenkins` | Choose the CI yourself: `github`, `jenkins` or `none` |
 | `init --force` | `api-guard init --force` | Replace files that already exist (it never does otherwise) |
+
+`init` exits `0` when it set things up, and `3` when the project has no OpenAPI
+spec yet (it printed what to add, and wrote nothing).
 
 ### The gate
 

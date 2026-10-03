@@ -175,6 +175,36 @@ def test_init_without_a_known_framework_turns_freshness_off_and_says_so(tmp_path
     assert "freshness    off" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("files,stack,step", [
+    ({"package.json": '{"dependencies": {"express": "^4.19.0"}}'}, "Express (Node.js)", "swagger-jsdoc"),
+    ({"package.json": '{"dependencies": {"@nestjs/core": "10"}}'}, "NestJS", "@nestjs/swagger"),
+    ({"requirements.txt": "flask\n"}, "Flask", "flask-smorest"),
+    ({"requirements.txt": "Django\n", "manage.py": ""}, "Django", "drf-spectacular"),
+    ({"pom.xml": "<artifactId>spring-boot-starter-web</artifactId>"}, "Spring Boot", "springdoc"),
+    ({}, None, "Write or generate an OpenAPI spec"),
+])
+def test_no_spec_means_nothing_written_and_the_exact_next_step(tmp_path, capsys, files, stack, step) -> None:
+    """A MERN app with no OpenAPI: no half setup, just what to do for *its* stack."""
+    from api_guard import init
+
+    for name, content in files.items():
+        (tmp_path / name).write_text(content, encoding="utf-8")
+
+    assert cli.main(["init", "--dir", str(tmp_path)]) == init.NEEDS_SPEC
+    out = capsys.readouterr().out
+    assert "No OpenAPI spec found" in out and step in out
+    assert (f"Detected: {stack}" in out) if stack else ("Detected:" not in out)
+    assert "Run `api-guard init` again" in out
+    assert not (tmp_path / "api-guard.yaml").exists() and not (tmp_path / ".gitignore").exists()
+
+
+def test_express_with_a_spec_already_is_set_up_normally(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text('{"dependencies": {"express": "^4"}}', encoding="utf-8")
+    (tmp_path / "openapi.json").write_text(json.dumps(SPEC), encoding="utf-8")
+    assert cli.main(["init", "--dir", str(tmp_path)]) == 0
+    assert load(tmp_path / "api-guard.yaml").spec.path == Path("openapi.json")
+
+
 # --- running with no config at all -------------------------------------------------
 
 

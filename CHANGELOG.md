@@ -13,6 +13,10 @@ Semver tags mean nothing to a consumer without this file: someone pinning
   `waivers.yaml`, the GitHub workflow and `.gitignore` lines. For Jenkins it
   prints a stage to paste. Never overwrites without `--force`; `--dry-run`
   shows what it would write.
+- A project with no OpenAPI spec and no way to generate one (common in
+  Express/MERN apps): `init` writes nothing, names the detected stack, prints
+  the exact steps to add a spec for it (swagger-jsdoc, @nestjs/swagger,
+  flask-smorest, drf-spectacular, springdoc), and exits 3.
 - No config needed to start: without `api-guard.yaml`, `check` finds the spec
   in the usual places and compares it with the default branch.
 - One headline per run: `API contract: OK`, `BLOCKED - …` or `COULD NOT
