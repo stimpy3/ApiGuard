@@ -5,6 +5,16 @@ Semver tags mean nothing to a consumer without this file: someone pinning
 
 ## [Unreleased]
 
+### VS Code extension (vscode/, 0.1.0)
+
+- The editor front end: status bar headline, squiggles on the spec and the
+  Problems panel, check on save, *Set up* (runs `init`, or shows the steps to
+  add a spec), an *Accept this break* quick fix that writes the waiver, and a
+  sidebar. It runs the same api-guard as CI (command or Docker image) and
+  reads result.json.
+- `init --json` for tools that drive it.
+- CI builds, tests (unit, and inside a headless VS Code) and packages it.
+
 ### Less setup
 
 - `api-guard init`: detects the spec, the framework (FastAPI, Django REST

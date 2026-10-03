@@ -1,0 +1,6 @@
+spec:
+  path: openapi.yaml
+  base: "git:origin/main"
+
+policy:
+  waivers: waivers.yaml

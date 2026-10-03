@@ -37,3 +37,29 @@ jobs:
           WORKDIR /src
           EOF
           docker run --rm --entrypoint python api-guard:ci-test -m pytest tests -q
+
+  vscode-extension:
+    # The editor front end: unit tests, then the extension inside a real
+    # VS Code (headless, on a virtual display), then a package that installs.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vscode
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: vscode/package-lock.json
+      - run: npm ci
+      - name: Unit tests
+        run: npm test
+      - name: Inside VS Code
+        run: xvfb-run -a npm run test:editor
+      - name: Package
+        run: npx vsce package --out api-guard.vsix
+      - uses: actions/upload-artifact@v4
+        with:
+          name: api-guard-vscode
+          path: vscode/api-guard.vsix

@@ -37,7 +37,28 @@ _GITIGNORE_LINES = ("api-guard-report/", ".api-guard/", GENERATED_SPEC)
 NEEDS_SPEC = 3
 
 
-def run(root: Path, *, ci: str = "auto", force: bool = False, dry_run: bool = False) -> int:
+def run(
+    root: Path, *, ci: str = "auto", force: bool = False, dry_run: bool = False, as_json: bool = False
+) -> int:
+    """Set the project up. With `as_json`, print one JSON object instead of text.
+
+    The JSON form is for tools that drive init (the VS Code extension): the
+    same decisions, as fields, plus the human text under "text".
+    """
+    if not as_json:
+        return _run(root, ci=ci, force=force, dry_run=dry_run)[0]
+
+    import contextlib
+    import io
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        code, info = _run(root, ci=ci, force=force, dry_run=dry_run)
+    print(json.dumps({**info, "exit_code": code, "text": buffer.getvalue()}, indent=2))
+    return code
+
+
+def _run(root: Path, *, ci: str, force: bool, dry_run: bool) -> tuple[int, dict]:
     found = detect_project.detect(root)
     framework = found.framework
     cmd = framework.generate_cmd if framework else None
@@ -60,7 +81,14 @@ def run(root: Path, *, ci: str = "auto", force: bool = False, dry_run: bool = Fa
             print(prefix + text)
         print("    2. Run `api-guard init` again: it will find the spec and finish the setup.")
         print("\n  Nothing was written.")
-        return NEEDS_SPEC
+        return NEEDS_SPEC, {
+            "status": "needs_spec",
+            "stack": stack,
+            "note": framework.note if framework else "",
+            # "$ " marks a command line, so a UI can show it as code.
+            "steps": steps,
+            "written": [],
+        }
 
     spec_rel = found.spec.relative_to(found.root).as_posix() if found.spec else (
         "openapi.json" if cmd else "openapi.yaml"
@@ -128,7 +156,22 @@ def run(root: Path, *, ci: str = "auto", force: bool = False, dry_run: bool = Fa
         step += 1
     print(f"  {step}. Try it:  docker run --rm -v \"$PWD:/work\" -w /work sohanbhadalkar/api-guard:1 check")
     print(f"  {step + 1}. Commit the new files.")
-    return 0
+    return 0, {
+        "status": "set_up",
+        "spec": spec_rel,
+        "spec_exists": found.spec is not None,
+        "create_spec_cmd": f"{cmd} > {spec_rel}" if cmd and not found.spec else None,
+        "framework": framework.name if framework else None,
+        "generate_cmd": cmd,
+        "base_branch": found.default_branch,
+        "ci": targets,
+        "checks": {"breaking": True, "freshness": bool(cmd), "conformance": False},
+        "written": written,
+        "kept": kept,
+        "gitignore_added": ignored,
+        "jenkins_stage": _jenkins(cmd) if "jenkins" in targets else None,
+        "dry_run": dry_run,
+    }
 
 
 def _config(spec_rel: str, branch: str, cmd: str | None, framework) -> str:

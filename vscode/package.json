@@ -1,0 +1,110 @@
+{
+  "name": "api-guard",
+  "displayName": "API Guard",
+  "description": "See API changes that would break your clients while you edit, before CI blocks them.",
+  "version": "0.1.0",
+  "publisher": "sohanbhadalkar",
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/stimpy3/ApiGuard.git",
+    "directory": "vscode"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["Linters", "Other"],
+  "keywords": ["openapi", "api", "breaking changes", "contract", "swagger"],
+  "main": "./out/src/extension.js",
+  "activationEvents": [
+    "workspaceContains:**/openapi.{yaml,yml,json}",
+    "workspaceContains:**/swagger.{yaml,yml,json}",
+    "workspaceContains:api-guard.yaml"
+  ],
+  "contributes": {
+    "commands": [
+      { "command": "apiGuard.check", "title": "Check the API contract", "category": "API Guard", "icon": "$(refresh)" },
+      { "command": "apiGuard.init", "title": "Set up API Guard in this project", "category": "API Guard", "icon": "$(gear)" },
+      { "command": "apiGuard.acceptBreak", "title": "Accept this break (add a waiver)", "category": "API Guard" },
+      { "command": "apiGuard.openReport", "title": "Open the full report", "category": "API Guard", "icon": "$(book)" },
+      { "command": "apiGuard.showOutput", "title": "Show the log", "category": "API Guard" }
+    ],
+    "menus": {
+      "view/title": [
+        { "command": "apiGuard.check", "when": "view == apiGuard.results", "group": "navigation@1" },
+        { "command": "apiGuard.openReport", "when": "view == apiGuard.results", "group": "navigation@2" },
+        { "command": "apiGuard.init", "when": "view == apiGuard.results", "group": "navigation@3" }
+      ],
+      "commandPalette": [
+        { "command": "apiGuard.acceptBreak", "when": "false" }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        { "id": "apiGuard", "title": "API Guard", "icon": "media/shield.svg" }
+      ]
+    },
+    "views": {
+      "apiGuard": [
+        { "id": "apiGuard.results", "name": "Contract" }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "apiGuard.results",
+        "contents": "Check whether your API changes would break the apps that use it.\n[Check the API contract](command:apiGuard.check)\nFirst time in this project?\n[Set up API Guard](command:apiGuard.init)"
+      }
+    ],
+    "configuration": {
+      "title": "API Guard",
+      "properties": {
+        "apiGuard.runner": {
+          "type": "string",
+          "enum": ["auto", "cli", "docker"],
+          "default": "auto",
+          "enumDescriptions": [
+            "Use the api-guard command if it is installed, otherwise Docker",
+            "Use the api-guard command (pip install api-guard)",
+            "Use the Docker image (nothing to install but Docker)"
+          ],
+          "description": "How the extension runs api-guard."
+        },
+        "apiGuard.cliPath": {
+          "type": "string",
+          "default": "api-guard",
+          "description": "The api-guard command, for the cli runner."
+        },
+        "apiGuard.dockerImage": {
+          "type": "string",
+          "default": "sohanbhadalkar/api-guard:1",
+          "description": "The api-guard image, for the docker runner."
+        },
+        "apiGuard.checkOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Check again when the spec, api-guard.yaml or waivers.yaml is saved."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "npm run compile && node --test \"out/test/**/*.test.js\"",
+    "test:editor": "npm run compile && node out/test/integration/run.js",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "yaml": "^2.5.0"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.0",
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/test-electron": "^2.4.0",
+    "@vscode/vsce": "^3.2.0",
+    "mocha": "^10.7.0",
+    "typescript": "^5.6.0"
+  }
+}

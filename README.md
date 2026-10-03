@@ -40,6 +40,24 @@ nothing, and prints the exact steps for your stack, e.g. for Express: add
 stage to paste); api-guard does everything else on each run. The only thing a
 person ever types is a name and a reason, when accepting a break on purpose.
 
+### In VS Code
+
+Prefer buttons to commands? The **API Guard extension** (in `vscode/`) shows the
+same results inside the editor, from the same api-guard run CI uses:
+
+- a status bar headline (`API: OK` / `API: 3 breaking`), checked again on save
+- each breaking change **underlined on its line** in the spec, and in Problems
+- *Set up API Guard*, which runs `init` (and shows the steps to add a spec if
+  there isn't one)
+- a lightbulb **"Accept this break"** that writes the waiver into
+  `waivers.yaml` for you: you only type your name and a reason
+- a sidebar with every check, change and waiver
+
+It needs Docker or the `api-guard` command. Until it's on the Marketplace,
+install the packaged file: Extensions view → `…` → *Install from VSIX…* →
+`api-guard-0.1.0.vsix` (built by `npm run package` in `vscode/`, or downloaded
+from the CI run's artifacts).
+
 Read on, top to bottom, for how it all works: each section builds on the one
 before.
 
@@ -1401,6 +1419,8 @@ api-guard/
 │       ├── mcp_server.py   the 8 read-only tools
 │       └── ui.py           the web page
 ├── tests/                  includes the "AI can't touch the verdict" tests
+├── vscode/                 the VS Code extension (TypeScript): status bar,
+│                           squiggles, set up, "accept this break", sidebar
 ├── action.yml              the GitHub Action
 ├── Dockerfile              the images
 └── jenkins/vars/           a Jenkins shared-library step
@@ -1421,8 +1441,9 @@ Stated plainly, so nobody discovers them the hard way:
 - **`init` knows four frameworks.** It writes the spec command for FastAPI and
   Django REST framework; for Spring and NestJS it explains what to add; for
   others, freshness stays off until you add a command.
-- **No editor integration yet.** Results show in the terminal, CI and the web
-  page; a VS Code extension is planned as the visual front end.
+- **The VS Code extension isn't on the Marketplace yet.** It installs from the
+  `.vsix` file. It doesn't yet show pending reviews or the `ask` agent (the web
+  page still does).
 - **The breaking check needs oasdiff**, which the Docker image has. Locally
   without it, 13 tests are skipped. CI runs them inside the image.
 

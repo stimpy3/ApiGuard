@@ -110,6 +110,7 @@ def main(argv: list[str] | None = None) -> int:
     init.add_argument("--force", action="store_true", help="Replace files that already exist.")
     init.add_argument("--dry-run", action="store_true", help="Show what would be written, write nothing.")
     init.add_argument("--dir", type=Path, default=Path("."), help="Project folder (default: here).")
+    init.add_argument("--json", action="store_true", help="Print the result as JSON (for tools such as the VS Code extension).")
 
     review = sub.add_parser(
         "review",
@@ -237,7 +238,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "init":
         from api_guard import init as setup
 
-        return setup.run(args.dir, ci=args.ci, force=args.force, dry_run=args.dry_run)
+        return setup.run(args.dir, ci=args.ci, force=args.force, dry_run=args.dry_run, as_json=args.json)
 
     if args.command == "review" and args.action:
         if args.action == "show" and not args.target:

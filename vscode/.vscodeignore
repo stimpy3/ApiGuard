@@ -1,0 +1,12 @@
+# Only the compiled extension, its runtime dependency (yaml), media and docs
+# go into the .vsix.
+src/**
+test/**
+out/test/**
+**/*.map
+**/*.ts
+tsconfig.json
+.vscode-test/**
+.gitignore
+node_modules/.bin/**
+node_modules/yaml/browser/**

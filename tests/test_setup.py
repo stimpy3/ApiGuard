@@ -205,6 +205,28 @@ def test_express_with_a_spec_already_is_set_up_normally(tmp_path: Path) -> None:
     assert load(tmp_path / "api-guard.yaml").spec.path == Path("openapi.json")
 
 
+def test_init_json_for_tools(tmp_path: Path, capsys) -> None:
+    """The VS Code extension drives init and reads fields, not prose."""
+    root = _fastapi_project(tmp_path)
+    assert cli.main(["init", "--dir", str(root), "--json"]) == 0
+    info = json.loads(capsys.readouterr().out)
+    assert info["status"] == "set_up" and info["exit_code"] == 0
+    assert info["spec"] == "docs/openapi.yaml" and info["framework"] == "FastAPI"
+    assert info["checks"] == {"breaking": True, "freshness": True, "conformance": False}
+    assert "api-guard.yaml" in info["written"]
+    assert "api-guard init" in info["text"], "the human text comes along"
+
+
+def test_init_json_when_a_spec_is_needed(tmp_path: Path, capsys) -> None:
+    from api_guard import init
+
+    (tmp_path / "package.json").write_text('{"dependencies": {"express": "^4"}}', encoding="utf-8")
+    assert cli.main(["init", "--dir", str(tmp_path), "--json"]) == init.NEEDS_SPEC
+    info = json.loads(capsys.readouterr().out)
+    assert info["status"] == "needs_spec" and info["stack"] == "Express (Node.js)"
+    assert "$ npm install swagger-jsdoc" in info["steps"]
+
+
 # --- running with no config at all -------------------------------------------------
 
 
