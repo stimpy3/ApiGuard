@@ -17,6 +17,9 @@ your CI does, so the editor and the pipeline never disagree.
   and method (`get:` under `/users`), and listed in the Problems panel.
 - **Check on save.** Saving the spec, `api-guard.yaml` or `waivers.yaml` checks
   again.
+- **Conformance when your API is running.** If `api-guard.yaml` has a
+  `runtime.url` and your API is up, its real responses are checked against the
+  spec too. If it isn't running, that check just shows as *not checked*.
 - **Set up in one click.** *API Guard: Set up* detects your spec, framework and
   CI and writes the setup files. No spec yet? It tells you exactly how to add
   one for your stack (Express, NestJS, Flask, Django, Spring, …).

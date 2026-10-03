@@ -57,6 +57,49 @@ def test_a_generator_that_genuinely_fails_is_still_an_error(tmp_path: Path) -> N
     assert result.status is Status.ERROR
 
 
+# --- conformance only when the API is running -------------------------------------
+
+
+def test_if_running_an_api_that_is_down_is_not_checked_not_an_error(tmp_path: Path) -> None:
+    """The editor case: nothing listening is normal, so say so, quickly."""
+    import shutil
+    import time
+
+    from api_guard.checks import conformance
+    from api_guard.config import RuntimeConfig
+
+    if shutil.which("schemathesis") is None:
+        pytest.skip("needs schemathesis (in the image)")
+    spec = tmp_path / "openapi.yaml"
+    spec.write_text(yaml.safe_dump(SPEC), encoding="utf-8")
+    down = RuntimeConfig(url="http://127.0.0.1:9", wait_for_schema=30)
+
+    started = time.monotonic()
+    result = conformance.run(down, spec, tmp_path, if_running=True)
+    assert result.status is Status.SKIPPED
+    assert result.summary == "API not running at http://127.0.0.1:9"
+    assert time.monotonic() - started < 10, "a short knock, not the 30 s CI wait"
+
+    strict = conformance.run(RuntimeConfig(url="http://127.0.0.1:9", wait_for_schema=1), spec, tmp_path)
+    assert strict.status is Status.ERROR, "without --if-running (CI) it's still an error"
+
+
+def test_if_running_flag_reaches_the_conformance_check(tmp_path: Path, monkeypatch) -> None:
+    from api_guard.checks import conformance
+
+    (tmp_path / "openapi.yaml").write_text(yaml.safe_dump(SPEC), encoding="utf-8")
+    (tmp_path / "api-guard.yaml").write_text(
+        "spec:\n  path: openapi.yaml\nruntime:\n  url: http://localhost:8000\n", encoding="utf-8"
+    )
+    seen = []
+    monkeypatch.setattr(conformance, "run", lambda *a, **k: seen.append(k.get("if_running"))
+                        or CheckResult(name="conformance", status=Status.SKIPPED, summary="x"))
+    config = str(tmp_path / "api-guard.yaml")
+    cli.main(["check", "--config", config, "--only", "conformance", "--if-running"])
+    cli.main(["check", "--config", config, "--only", "conformance"])
+    assert seen == [True, False]
+
+
 # --- project detection -----------------------------------------------------------
 
 

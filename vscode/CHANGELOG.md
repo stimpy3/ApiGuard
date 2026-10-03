@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.2
+
+- Conformance is checked when your API is running, and simply "not
+  checked: API not running" when it isn't. No setting to switch, no error,
+  no 30-second wait (uses api-guard's `--if-running`).
+- With the Docker runner, a `runtime.url` on `localhost` is reached as
+  `host.docker.internal`, so an API running on your machine is found from
+  inside the container. Your api-guard.yaml is unchanged for CI.
+- The `apiGuard.conformance` setting from 0.1.1 is gone.
+
 ## 0.1.1
 
 - The editor checks the spec (breaking and freshness) and leaves out

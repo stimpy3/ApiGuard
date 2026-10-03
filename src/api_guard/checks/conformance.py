@@ -57,7 +57,20 @@ _EXIT_FAILED = 1
 _EXIT_ERROR = 2
 
 
-def run(runtime: RuntimeConfig | None, spec_path: Path, root: Path) -> CheckResult:
+# --if-running: how long to knock before deciding the API simply isn't up.
+_IF_RUNNING_WAIT = 3
+
+
+def run(
+    runtime: RuntimeConfig | None, spec_path: Path, root: Path, *, if_running: bool = False
+) -> CheckResult:
+    """Run Schemathesis against the live API.
+
+    `if_running` is for places where the API may legitimately be down, like an
+    editor: knock briefly, and if nothing answers report "not checked" instead
+    of an error. CI leaves it off, because there the pipeline starts the API,
+    so an API that isn't answering is a real problem worth stopping on.
+    """
     if runtime is None:
         return CheckResult(
             name=NAME,
@@ -84,8 +97,19 @@ def run(runtime: RuntimeConfig | None, spec_path: Path, root: Path) -> CheckResu
     # Fail fast and clearly if the API is not there. Schemathesis would
     # otherwise run every generated case against a closed port and report a
     # wall of "connection refused" as contract failures.
-    unreachable = _wait_for_api(runtime.url, runtime.wait_for_schema)
+    wait = min(_IF_RUNNING_WAIT, runtime.wait_for_schema) if if_running else runtime.wait_for_schema
+    unreachable = _wait_for_api(runtime.url, wait)
     if unreachable is not None:
+        if if_running:
+            return CheckResult(
+                name=NAME,
+                status=Status.SKIPPED,
+                summary=f"API not running at {runtime.url}",
+                detail=(
+                    "Conformance sends requests to the running API. Start it to have this "
+                    f"checked too.\n\n{unreachable.detail}"
+                ),
+            )
         return unreachable
 
     with tempfile.TemporaryDirectory(prefix="api-guard-conformance-") as tmp:

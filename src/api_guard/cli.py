@@ -78,6 +78,15 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     common.add_argument(
+        "--if-running",
+        action="store_true",
+        help=(
+            "Check conformance only if the API answers (a few seconds' wait); "
+            "otherwise report it as not checked rather than an error. For "
+            "editors, where the API is often not running. CI leaves this off."
+        ),
+    )
+    common.add_argument(
         "--base",
         default=None,
         help=(
@@ -265,6 +274,7 @@ def main(argv: list[str] | None = None) -> int:
             base=args.base,
             only=selected,
             explain=args.explain,
+            if_running=args.if_running,
             review=(args.state, args.review_id) if args.command == "review" else None,
         )
     parser.error(f"unknown command {args.command}")
@@ -290,6 +300,7 @@ def _run_check(
     base: str | None = None,
     only: set[str] | None,
     explain: bool,
+    if_running: bool = False,
     review: tuple[Path | None, str | None] | None = None,
 ) -> int:
     if not config_path.exists() and config_path == Path("api-guard.yaml"):
@@ -342,7 +353,7 @@ def _run_check(
         print(f"api-guard: {exc}", file=sys.stderr)
         return EXIT_TOOL_ERROR
 
-    result = _check(config, waivers, generated=generated, only=only)
+    result = _check(config, waivers, generated=generated, only=only, if_running=if_running)
 
     # Runs after the verdict, deliberately. The exit code below is already
     # fixed by this point, whatever the model does or fails to do.
@@ -379,6 +390,7 @@ def _check(
     *,
     generated: bytes | None = None,
     only: set[str] | None = None,
+    if_running: bool = False,
 ) -> RunResult:
     checks: list[CheckResult] = []
     changes: list[Change] = []
@@ -424,7 +436,7 @@ def _check(
         checks.append(result)
 
     if wanted(conformance.NAME):
-        checks.append(conformance.run(config.runtime, spec_path, config.root))
+        checks.append(conformance.run(config.runtime, spec_path, config.root, if_running=if_running))
     else:
         checks.append(_skipped(conformance.NAME))
 

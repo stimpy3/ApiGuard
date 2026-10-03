@@ -13,7 +13,8 @@ import * as vscode from "vscode";
 import { readConfig } from "./config";
 import { locate } from "./locate";
 import { blockingChanges, Change, headline, parseResult, RunResult, statusText } from "./result";
-import { RunnerMissing, RunnerSettings, runApiGuard } from "./runner";
+import { checkArgs } from "./args";
+import { resolveRunner, RunnerMissing, RunnerSettings, runApiGuard } from "./runner";
 import { Located, ResultsTree } from "./tree";
 import { appendWaiver, validateReason, waivedFingerprints, waiverEntry } from "./waiver";
 
@@ -135,13 +136,12 @@ async function doCheck(manual: boolean): Promise<void> {
 
   status.text = "$(sync~spin) API: checking";
   log(`\n[${new Date().toLocaleTimeString()}] api-guard check`);
-  // Conformance needs the API running; while editing it usually isn't, and
-  // api-guard would wait for it, then report "could not check". So the
-  // editor checks the spec (breaking, freshness) unless asked for more.
-  const args = setting<boolean>("conformance") ? ["check"] : ["check", "--only", "breaking,freshness"];
+  // Conformance runs only if the API is up (see args.ts); otherwise it's
+  // "not checked", never an error or a long wait.
   let out;
   try {
-    out = await runApiGuard(runnerSettings(), root, args);
+    const kind = await resolveRunner(runnerSettings(), root);
+    out = await runApiGuard(runnerSettings(), root, checkArgs(kind, config.runtimeUrl));
   } catch (error) {
     return showProblem(error instanceof RunnerMissing ? error.message : String(error), manual);
   }

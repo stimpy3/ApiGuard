@@ -82,7 +82,14 @@ export async function runApiGuard(
   // paths in result.json are the same relative paths CI would report.
   return exec(
     "docker",
-    ["run", "--rm", "-v", `${projectRoot}:/work`, "-w", "/work", settings.dockerImage, ...args],
+    [
+      "run", "--rm",
+      // So host.docker.internal reaches this machine on Linux too (Docker
+      // Desktop provides it already); used to reach an API running locally.
+      "--add-host=host.docker.internal:host-gateway",
+      "-v", `${projectRoot}:/work`, "-w", "/work",
+      settings.dockerImage, ...args,
+    ],
     projectRoot,
     timeoutMs,
   );

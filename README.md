@@ -293,6 +293,13 @@ drifted, e.g. returning `null` for a required field. If the server isn't
 reachable at all, that's reported as an **error**, not a contract failure,
 because nothing was actually tested.
 
+**When the API might just not be running** (on a laptop, in an editor), use
+`--if-running`: api-guard knocks for a few seconds, runs conformance if the API
+answers, and otherwise reports it as *not checked: API not running*, never an
+error. CI leaves it off, because there the pipeline starts the API itself, so
+an API that doesn't answer is a real problem. The VS Code extension always uses
+it.
+
 ---
 
 ## 4. The verdict: pass, fail or error
@@ -1320,6 +1327,7 @@ spec yet (it printed what to add, and wrote nothing).
 | `--only` | `api-guard check --only breaking` | Run only some of `freshness`, `breaking`, `conformance` |
 | `--url` | `api-guard check --only conformance --url http://localhost:8080` | Test a different running API, e.g. staging after deploy |
 | `--base` | `api-guard check --base git:a1b2c3d` | Compare against a different spec than `spec.base`, e.g. the last deployed commit when building `main` |
+| `--if-running` | `api-guard check --if-running` | Run conformance only if the API answers; otherwise "not checked" instead of an error. For laptops and editors, not CI |
 
 ### AI features (need `GROQ_API_KEY`)
 

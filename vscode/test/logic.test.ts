@@ -4,6 +4,7 @@
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import { parseDocument } from "yaml";
+import { checkArgs, urlForDocker } from "../src/args";
 import { readConfig } from "../src/config";
 import { locate } from "../src/locate";
 import { blockingChanges, headline, parseResult, statusText } from "../src/result";
@@ -136,7 +137,27 @@ test("expiry dates don't drift across month ends", () => {
 // --- config -----------------------------------------------------------------------
 
 test("no api-guard.yaml means api-guard's defaults", () => {
-  assert.deepEqual(readConfig(null), { exists: false, reportDir: "api-guard-report", waiversFile: "waivers.yaml", maxWaiverDays: 90 });
+  assert.deepEqual(readConfig(null), {
+    exists: false, reportDir: "api-guard-report", waiversFile: "waivers.yaml", maxWaiverDays: 90, runtimeUrl: null,
+  });
+});
+
+// --- check arguments ----------------------------------------------------------------
+
+test("every check asks for conformance only if the API is running", () => {
+  assert.deepEqual(checkArgs("cli", "http://localhost:8000"), ["check", "--if-running"]);
+  assert.deepEqual(checkArgs("docker", null), ["check", "--if-running"]);
+});
+
+test("in Docker, localhost means this machine: host.docker.internal", () => {
+  assert.deepEqual(checkArgs("docker", "http://localhost:8000"), ["check", "--if-running", "--url", "http://host.docker.internal:8000"]);
+  assert.equal(urlForDocker("http://127.0.0.1:8080/api/"), "http://host.docker.internal:8080/api/");
+  assert.equal(urlForDocker("https://staging.example.com"), null, "a real host is left alone");
+  assert.equal(urlForDocker("not a url"), null);
+});
+
+test("runtime.url is read from api-guard.yaml", () => {
+  assert.equal(readConfig("spec:\n  path: x.yaml\nruntime:\n  url: http://localhost:8000\n").runtimeUrl, "http://localhost:8000");
 });
 
 test("settings come from api-guard.yaml when present", () => {

@@ -2,7 +2,7 @@
   "name": "api-guard",
   "displayName": "API Guard",
   "description": "See API changes that would break your clients while you edit, before CI blocks them.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "sohanbhadalkar",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -90,11 +90,6 @@
           "type": "boolean",
           "default": true,
           "description": "Check again when the spec, api-guard.yaml or waivers.yaml is saved."
-        },
-        "apiGuard.conformance": {
-          "type": "boolean",
-          "default": false,
-          "description": "Also run the conformance check, which sends requests to your running API (runtime.url in api-guard.yaml). Off by default: while editing, the API usually isn't running."
         }
       }
     }

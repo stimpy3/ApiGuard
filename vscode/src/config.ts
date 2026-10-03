@@ -8,13 +8,20 @@ export interface GuardConfig {
   reportDir: string;
   waiversFile: string | null; // null: the config exists but has no waivers file
   maxWaiverDays: number;
+  runtimeUrl: string | null; // where the running API is, for conformance
 }
 
 export function readConfig(text: string | null): GuardConfig {
   if (text === null) {
     // No api-guard.yaml: api-guard runs on defaults, and uses waivers.yaml
     // at the project root when it exists.
-    return { exists: false, reportDir: "api-guard-report", waiversFile: "waivers.yaml", maxWaiverDays: 90 };
+    return {
+      exists: false,
+      reportDir: "api-guard-report",
+      waiversFile: "waivers.yaml",
+      maxWaiverDays: 90,
+      runtimeUrl: null,
+    };
   }
   let data: any = {};
   try {
@@ -27,5 +34,6 @@ export function readConfig(text: string | null): GuardConfig {
     reportDir: data?.report?.dir ?? "api-guard-report",
     waiversFile: data?.policy?.waivers ?? null,
     maxWaiverDays: Number(data?.policy?.max_waiver_days ?? 90),
+    runtimeUrl: data?.runtime?.url ?? null,
   };
 }

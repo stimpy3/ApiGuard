@@ -13,6 +13,10 @@ Semver tags mean nothing to a consumer without this file: someone pinning
   sidebar. It runs the same api-guard as CI (command or Docker image) and
   reads result.json.
 - `init --json` for tools that drive it.
+- `check --if-running`: conformance runs only if the API answers within a
+  few seconds; otherwise it's "not checked: API not running" instead of an
+  error after a 30-second wait. The extension always uses it, and with the
+  Docker runner reaches an API on `localhost` as `host.docker.internal`.
 - CI builds, tests (unit, and inside a headless VS Code) and packages it.
 
 ### Less setup
