@@ -75,39 +75,114 @@ def run(
 
     if completed.returncode != 0:
         stderr = completed.stderr.decode("utf-8", errors="replace").strip()
-        hint = ""
-        if "ModuleNotFoundError" in stderr or "ImportError" in stderr:
-            hint = (
-                "\n\nThe generator could not import the project's own dependencies. "
-                "If api-guard is running from its Docker image that is expected — "
-                "the image contains oasdiff and Schemathesis, not your application's "
-                "packages. Generate the spec in the project's environment and pass "
-                "it in with --generated-spec instead."
+        if _missing_project_environment(completed.returncode, stderr):
+            # Not a broken contract and not a broken config: the generator needs
+            # the project's own packages, and they are not here — the normal
+            # case when api-guard runs from its Docker image on a laptop. Say
+            # so, and let the other checks give their answer.
+            return CheckResult(
+                name=NAME,
+                status=Status.SKIPPED,
+                summary="not checked here: the spec generator needs your project's dependencies",
+                detail=(
+                    f"Command: {generate_cmd}\n\n{stderr[-600:]}\n\n"
+                    "The Docker image contains api-guard's tools, not your application's "
+                    "packages. Freshness runs where they are installed: generate the spec "
+                    "in your project's environment and pass it with --generated-spec "
+                    "(the CI setup from `api-guard init` does this)."
+                ),
             )
         return CheckResult(
             name=NAME,
             status=Status.ERROR,
             summary=f"spec.generate_cmd failed (exit {completed.returncode})",
-            detail=f"Command: {generate_cmd}\n\n{stderr}{hint}",
+            detail=f"Command: {generate_cmd}\n\n{stderr}",
         )
 
     return _compare(completed.stdout, committed, source=generate_cmd)
 
 
+_MISSING_ENV_MARKERS = (
+    "ModuleNotFoundError",
+    "ImportError",
+    "command not found",
+    "No such file or directory",
+)
+
+
+def _missing_project_environment(returncode: int, stderr: str) -> bool:
+    """The generator could not even start: its interpreter, tool or packages are absent."""
+    return returncode == 127 or any(marker in stderr for marker in _MISSING_ENV_MARKERS)
+
+
 def _compare(generated: bytes, committed: bytes, *, source: str) -> CheckResult:
-    if generated == committed:
+    """Same contract, regardless of how it was written down.
+
+    Compared as parsed data, not bytes: a generator printing JSON against a
+    committed YAML file, different key order, indentation or line endings are
+    all the same contract, and failing on them taught people to ignore this
+    check. Falls back to bytes only if either side cannot be parsed.
+    """
+    parsed_generated, parsed_committed = _parse(generated), _parse(committed)
+    if parsed_generated is not None and parsed_committed is not None:
+        if parsed_generated == parsed_committed:
+            return _passed()
         return CheckResult(
             name=NAME,
-            status=Status.PASSED,
-            summary="committed spec matches the code",
+            status=Status.FAILED,
+            summary="committed spec is out of date",
+            detail=_explain_data(parsed_generated, parsed_committed, source),
         )
 
+    if generated == committed:
+        return _passed()
     return CheckResult(
         name=NAME,
         status=Status.FAILED,
         summary="committed spec is out of date",
         detail=_explain(generated, committed, source),
     )
+
+
+def _passed() -> CheckResult:
+    return CheckResult(name=NAME, status=Status.PASSED, summary="committed spec matches the code")
+
+
+def _parse(raw: bytes):
+    import yaml
+
+    try:
+        return yaml.safe_load(raw.decode("utf-8-sig"))  # JSON is valid YAML
+    except (yaml.YAMLError, UnicodeDecodeError):
+        return None
+
+
+def _differences(generated, committed, path: str = "", out: list | None = None, limit: int = 12) -> list[str]:
+    """Where the two documents disagree, as readable paths, up to `limit`."""
+    out = [] if out is None else out
+    if len(out) >= limit:
+        return out
+    if isinstance(generated, dict) and isinstance(committed, dict):
+        for key in sorted(set(generated) | set(committed), key=str):
+            here = f"{path}.{key}" if path else str(key)
+            if key not in committed:
+                out.append(f"in the code, not in the committed spec: {here}")
+            elif key not in generated:
+                out.append(f"in the committed spec, no longer in the code: {here}")
+            else:
+                _differences(generated[key], committed[key], here, out, limit)
+            if len(out) >= limit:
+                break
+    elif generated != committed:
+        out.append(f"different value: {path or '(document)'}")
+    return out
+
+
+def _explain_data(generated, committed, source: str) -> str:
+    lines = ["The spec generated from the current code differs from the committed file:", ""]
+    lines += [f"  - {d}" for d in _differences(generated, committed)]
+    lines += ["", "Regenerate and commit the spec:", f"  {source}"]
+    return "\n".join(lines)
 
 
 def _explain(generated: bytes, committed: bytes, generate_cmd: str) -> str:

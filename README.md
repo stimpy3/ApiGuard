@@ -8,7 +8,36 @@ it works with any language. Rules decide whether a build passes. An optional AI
 layer, running on a free Groq API key, only explains results and answers
 questions. It never decides.
 
-Read top to bottom: each section builds on the one before.
+## Quick start
+
+All you need is Docker and a project with an OpenAPI spec. In your project
+folder:
+
+```bash
+# 1. Try it. No setup: api-guard finds your spec and compares it with main.
+docker run --rm -v "$PWD:/work" -w /work sohanbhadalkar/api-guard:1 check
+
+# 2. Set it up. Detects your spec, framework and CI, and writes the files.
+docker run --rm -v "$PWD:/work" -w /work sohanbhadalkar/api-guard:1 init
+
+# 3. Commit what init wrote. From then on CI checks every push.
+```
+
+What you get back is one line, then the details:
+
+```
+API contract: OK
+  PASSED   breaking     no breaking changes
+  not checked: conformance (no runtime section configured)
+```
+
+**Who makes what:** your framework produces the spec; `init` writes
+`api-guard.yaml`, `waivers.yaml` and the GitHub workflow (or prints a Jenkins
+stage to paste); api-guard does everything else on each run. The only thing a
+person ever types is a name and a reason, when accepting a break on purpose.
+
+Read on, top to bottom, for how it all works: each section builds on the one
+before.
 
 **Contents**
 
@@ -116,6 +145,19 @@ Or your pipeline generates the file and passes it in with `--generated-spec`.
 For a hand-written spec, leave both out: the freshness check is then skipped,
 and the other two still run.
 
+**You usually don't write that command yourself.** `api-guard init` looks at
+your project and fills it in where it can:
+
+| It finds | It writes |
+|---|---|
+| FastAPI in your Python dependencies, and `app = FastAPI(...)` in a file | A command that imports your app and prints `app.openapi()` |
+| Django REST framework with drf-spectacular, and `manage.py` | `python manage.py spectacular` |
+| Spring Boot with springdoc | No command (the spec only exists while the app runs); explains how to fetch it from `/v3/api-docs` |
+| NestJS with `@nestjs/swagger` | No command (built at runtime); explains what small script would do it |
+| Anything else | No command; freshness stays off until you add one |
+
+It never guesses: a wrong command would make freshness a permanent false alarm.
+
 ---
 
 ## 3. The three checks
@@ -138,10 +180,18 @@ flowchart LR
 ### Freshness
 
 api-guard gets a freshly generated spec (by running `generate_cmd`, or from
-`--generated-spec`) and compares it **byte for byte** with the committed
-`openapi.yaml`. Any difference means someone changed the code and forgot to
-regenerate. If the only difference is Windows vs. Unix line endings, the error
-message says so, because that's the usual cause on Windows.
+`--generated-spec`) and compares its **content** with the committed spec. It
+compares the parsed data, not the bytes, so a generator that prints JSON
+against a committed YAML file, a different key order, or Windows line endings
+all count as the same spec. Any real difference means someone changed the code
+and forgot to regenerate, and the failure lists where, e.g. "in the code, not
+in the committed spec: paths./orders".
+
+If the generator can't even start because your project's packages aren't
+installed (the usual case in the Docker image on a laptop), freshness is
+reported as **not checked here** rather than failed. In CI, the setup from
+`api-guard init` generates the spec in your project's environment and passes it
+in, so freshness runs there.
 
 **Why it runs at all:** the breaking check only compares spec files. If you
 delete `email` in the code but don't regenerate the spec, both spec files still
@@ -223,14 +273,29 @@ flowchart TD
 detected" sends people hunting for a change that doesn't exist, and after that
 happens twice they stop trusting the gate.
 
-When a check is **skipped** instead of failed:
+Every run starts with **one headline**, so nobody has to read three check
+names to know where they stand:
+
+| Headline | Means |
+|---|---|
+| `API contract: OK` | Exit 0. Nothing blocks (waived changes are counted) |
+| `API contract: BLOCKED - changes that would break clients` | Exit 1, followed by whichever checks failed |
+| `API contract: COULD NOT CHECK` | Exit 2. A setup problem, not your API |
+
+A check that didn't run is listed once, on a single **not checked** line,
+because it's information, not a problem:
 
 | Situation | Result |
 |---|---|
-| No `generate_cmd` and no `--generated-spec` | Freshness skipped: the spec is assumed hand-written |
-| No old spec yet (first build, or the spec is new on this branch) | Breaking skipped: nothing can have broken |
-| No `runtime:` section in the config | Conformance skipped |
-| Left out with `--only` | Skipped |
+| No generator configured, and no `--generated-spec` | Freshness not checked: the spec is assumed hand-written |
+| The generator needs your project's packages and they aren't installed here | Freshness not checked here (runs in CI instead) |
+| No old spec yet (first build, or the spec is new on this branch) | Breaking not checked: nothing can have broken |
+| No `runtime:` section in the config | Conformance not checked |
+| Left out with `--only` | Not checked |
+
+**Defaults, so you rarely configure checks at all:** breaking is always on;
+freshness switches on when `api-guard init` finds a way to regenerate your spec;
+conformance is opt-in, because it needs a running server.
 
 ---
 
@@ -440,8 +505,14 @@ expires and gets cleaned out, and can't be reused by accident later.
 
 ## 6. Configuration
 
-`api-guard.yaml` lives next to your spec. Only `spec.path` is required; leaving
-a section out turns off the check that needs it.
+`api-guard.yaml` lives next to your spec. You normally get it from
+`api-guard init`, and you don't need one at all to start: without it,
+`api-guard check` finds your spec in the usual places (`openapi.yaml`,
+`docs/openapi.yaml`, `openapi.json`, ...) and compares it with your default
+branch.
+
+Only `spec.path` is required; leaving a section out turns off the check that
+needs it.
 
 ```yaml
 spec:
@@ -1182,11 +1253,20 @@ pip install -e ".[cli,ai,ui]"      # + the web page
 
 Or skip installing entirely and use Docker (section 13).
 
+### Setting up
+
+| Command | Example | Use it when |
+|---|---|---|
+| `init` | `api-guard init` | First time in a project: detects the spec, framework, default branch and CI, then writes `api-guard.yaml`, `waivers.yaml`, the GitHub workflow and `.gitignore` lines (Jenkins: prints a stage to paste) |
+| `init --dry-run` | `api-guard init --dry-run` | See what it would write, without writing |
+| `init --ci` | `api-guard init --ci jenkins` | Choose the CI yourself: `github`, `jenkins` or `none` |
+| `init --force` | `api-guard init --force` | Replace files that already exist (it never does otherwise) |
+
 ### The gate
 
 | Command | Example | Use it when |
 |---|---|---|
-| `check` | `api-guard check` | Run all three checks against `./api-guard.yaml` |
+| `check` | `api-guard check` | Run the checks against `./api-guard.yaml`, or on defaults if there isn't one |
 | `--config` | `api-guard check --config path/to/api-guard.yaml` | The config isn't in the current folder |
 | `--generated-spec` | `api-guard check --generated-spec generated.yaml` | Your pipeline already exported the spec |
 | `--only` | `api-guard check --only breaking` | Run only some of `freshness`, `breaking`, `conformance` |
@@ -1277,6 +1357,8 @@ api-guard/
 │   │   ├── breaking.py     oasdiff + waivers
 │   │   └── conformance.py  Schemathesis against the live API
 │   ├── policy.py           waivers: loading, expiry, matching
+│   ├── project.py          detecting the spec, framework, branch and CI
+│   ├── init.py             api-guard init: writing the setup files
 │   ├── verdict.py          combining checks into one verdict   ← no AI allowed
 │   ├── report.py           report.md / result.json / junit.xml
 │   └── ai/                 everything optional
@@ -1306,6 +1388,11 @@ Stated plainly, so nobody discovers them the hard way:
   another free provider would be added.
 - **The shared Jenkins library** (`jenkins/vars/apiGuard.groovy`) runs `check`
   only, without approval.
+- **`init` knows four frameworks.** It writes the spec command for FastAPI and
+  Django REST framework; for Spring and NestJS it explains what to add; for
+  others, freshness stays off until you add a command.
+- **No editor integration yet.** Results show in the terminal, CI and the web
+  page; a VS Code extension is planned as the visual front end.
 - **The breaking check needs oasdiff**, which the Docker image has. Locally
   without it, 13 tests are skipped. CI runs them inside the image.
 

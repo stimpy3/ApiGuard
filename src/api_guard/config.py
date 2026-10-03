@@ -204,6 +204,32 @@ class Config(_Base):
         return path if path.is_absolute() else (self.root / path)
 
 
+def defaults_for(root: Path) -> Config | None:
+    """A config for a project with no api-guard.yaml, or None if no spec is found.
+
+    So `api-guard check` works before any setup: find the spec where it
+    usually lives, compare it with the default branch, and run the checks
+    that need nothing else. `api-guard init` writes the same thing to a file
+    when the user wants to change it.
+    """
+    from api_guard import project
+
+    root = root.resolve()
+    spec = project.find_spec(root)
+    if spec is None:
+        return None
+    config = Config(
+        spec=SpecConfig(
+            path=spec.relative_to(root),
+            base=f"git:origin/{project._default_branch(root)}",
+        )
+    )
+    if (root / "waivers.yaml").is_file():
+        config.policy.waivers = Path("waivers.yaml")
+    config.root = root
+    return config
+
+
 def load(config_path: Path) -> Config:
     """Read and validate `api-guard.yaml`.
 

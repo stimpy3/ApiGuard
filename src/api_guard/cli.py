@@ -98,6 +98,19 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("check", parents=[common], help="Run the contract checks.")
 
+    init = sub.add_parser(
+        "init",
+        help=(
+            "Set up api-guard in this project: find the spec and framework, then write "
+            "api-guard.yaml, waivers.yaml and the CI config. Never overwrites without --force."
+        ),
+    )
+    init.add_argument("--ci", choices=["auto", "github", "jenkins", "none"], default="auto",
+                      help="Which CI to set up (default: whatever the project already uses).")
+    init.add_argument("--force", action="store_true", help="Replace files that already exist.")
+    init.add_argument("--dry-run", action="store_true", help="Show what would be written, write nothing.")
+    init.add_argument("--dir", type=Path, default=Path("."), help="Project folder (default: here).")
+
     review = sub.add_parser(
         "review",
         parents=[common],
@@ -221,6 +234,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command in ("approve", "reject", "ask-review"):
         return _decide(args)
 
+    if args.command == "init":
+        from api_guard import init as setup
+
+        return setup.run(args.dir, ci=args.ci, force=args.force, dry_run=args.dry_run)
+
     if args.command == "review" and args.action:
         if args.action == "show" and not args.target:
             parser.error("review show needs a review id: api-guard review show 42")
@@ -273,11 +291,28 @@ def _run_check(
     explain: bool,
     review: tuple[Path | None, str | None] | None = None,
 ) -> int:
-    try:
-        config = load(config_path)
-    except ConfigError as exc:
-        print(f"api-guard: {exc}", file=sys.stderr)
-        return EXIT_TOOL_ERROR
+    if not config_path.exists() and config_path == Path("api-guard.yaml"):
+        # No setup yet: run on defaults if a spec can be found, so the first
+        # try needs nothing written.
+        from api_guard.config import defaults_for
+
+        config = defaults_for(Path.cwd())
+        if config is None:
+            print(
+                "api-guard: no api-guard.yaml here, and no OpenAPI spec found in the usual "
+                "places (openapi.yaml, docs/openapi.yaml, ...).\n"
+                "Run `api-guard init` to set up, or pass --config.",
+                file=sys.stderr,
+            )
+            return EXIT_TOOL_ERROR
+        print(f"api-guard: no api-guard.yaml, using defaults (spec {config.spec.path.as_posix()}, "
+              f"compared with {config.spec.base[4:]}). `api-guard init` writes them to a file.")
+    else:
+        try:
+            config = load(config_path)
+        except ConfigError as exc:
+            print(f"api-guard: {exc}", file=sys.stderr)
+            return EXIT_TOOL_ERROR
 
     if base is not None:
         config.spec.base = base
@@ -717,10 +752,38 @@ def _ui(port: int) -> int:
     )
 
 
+_WHAT_FAILED = {
+    "breaking": "changes that would break clients",
+    "freshness": "the committed spec is out of date",
+    "conformance": "the running API doesn't match its spec",
+}
+
+
+def headline(result: RunResult) -> str:
+    """One line a person can act on, before any per-check detail."""
+    if result.verdict is Status.ERROR:
+        return "API contract: COULD NOT CHECK (a setup problem, not your API; details below)"
+    if result.verdict is Status.FAILED:
+        failed = [c for c in result.checks if c.status is Status.FAILED]
+        return "API contract: BLOCKED - " + "; ".join(
+            _WHAT_FAILED.get(c.name, c.summary) for c in failed
+        )
+    waived = f" ({len(result.waivers.applied)} change(s) waived)" if result.waivers.applied else ""
+    return f"API contract: OK{waived}"
+
+
 def _print_summary(result: RunResult, written: dict[str, Path]) -> None:
     print()
+    print(headline(result))
+    print()
+    # The checks that ran, then the ones that didn't, on one line: "not
+    # checked" is information, not a problem to shout about.
     for check in result.checks:
-        print(f"  {check.status.value.upper():<8} {check.name:<12} {check.summary}")
+        if check.status is not Status.SKIPPED:
+            print(f"  {check.status.value.upper():<8} {check.name:<12} {check.summary}")
+    skipped = [c for c in result.checks if c.status is Status.SKIPPED]
+    if skipped:
+        print("  not checked: " + "; ".join(f"{c.name} ({c.summary})" for c in skipped))
 
     if result.waivers.applied:
         print(f"\n  {len(result.waivers.applied)} waived breaking change(s):")

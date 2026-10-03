@@ -5,6 +5,25 @@ Semver tags mean nothing to a consumer without this file: someone pinning
 
 ## [Unreleased]
 
+### Less setup
+
+- `api-guard init`: detects the spec, the framework (FastAPI, Django REST
+  framework + drf-spectacular; Spring and NestJS with guidance), the default
+  branch and the CI, then writes `api-guard.yaml`, an empty commented
+  `waivers.yaml`, the GitHub workflow and `.gitignore` lines. For Jenkins it
+  prints a stage to paste. Never overwrites without `--force`; `--dry-run`
+  shows what it would write.
+- No config needed to start: without `api-guard.yaml`, `check` finds the spec
+  in the usual places and compares it with the default branch.
+- One headline per run: `API contract: OK`, `BLOCKED - …` or `COULD NOT
+  CHECK`, then the checks that ran, and one "not checked" line for the rest.
+- Freshness compares the parsed spec, not bytes: JSON from a generator matches
+  committed YAML, and key order or line endings no longer cause failures. The
+  failure lists where the documents differ.
+- A spec generator that can't start because the project's packages aren't
+  installed (the Docker image on a laptop) makes freshness "not checked here"
+  instead of a tooling error.
+
 ### Shared model layer and a sturdier agent
 
 - New `ai/llm.py`: every model call goes through it. A model per job
