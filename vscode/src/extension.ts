@@ -135,9 +135,13 @@ async function doCheck(manual: boolean): Promise<void> {
 
   status.text = "$(sync~spin) API: checking";
   log(`\n[${new Date().toLocaleTimeString()}] api-guard check`);
+  // Conformance needs the API running; while editing it usually isn't, and
+  // api-guard would wait for it, then report "could not check". So the
+  // editor checks the spec (breaking, freshness) unless asked for more.
+  const args = setting<boolean>("conformance") ? ["check"] : ["check", "--only", "breaking,freshness"];
   let out;
   try {
-    out = await runApiGuard(runnerSettings(), root, ["check"]);
+    out = await runApiGuard(runnerSettings(), root, args);
   } catch (error) {
     return showProblem(error instanceof RunnerMissing ? error.message : String(error), manual);
   }

@@ -19,6 +19,8 @@ if (args[0] === "init") {
 }
 
 if (args[0] === "check") {
+  fs.mkdirSync("api-guard-report", { recursive: true });
+  fs.writeFileSync(path.join("api-guard-report", "args.json"), JSON.stringify(args));
   const waivers = fs.existsSync("waivers.yaml") ? fs.readFileSync("waivers.yaml", "utf-8") : "";
   const all = [
     { fingerprint: "aaa111aaa111", id: "response-required-property-removed", text: "removed the required property `email` from the response", severity: "ERR", operation: "GET", path: "/users" },

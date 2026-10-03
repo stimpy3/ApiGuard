@@ -44,6 +44,13 @@ suite("API Guard in the editor", () => {
     assert.ok(diags.every((d) => d.code === "response-required-property-removed" || d.code === "new-required-request-property"));
   });
 
+  test("the editor doesn't ask for conformance, which needs a running API", () => {
+    // Regression: sample-api configures runtime.url, nothing listens while
+    // editing, and every check ended "could not check" after a 30 s wait.
+    const args = JSON.parse(fs.readFileSync(path.join(root(), "api-guard-report", "args.json"), "utf-8"));
+    assert.deepStrictEqual(args, ["check", "--only", "breaking,freshness"]);
+  });
+
   test("the lightbulb offers to accept a break, and that writes a valid waiver", async () => {
     const doc = await vscode.workspace.openTextDocument(specUri());
     const getDiag = guardDiagnostics().find((d) => doc.lineAt(d.range.start.line).text.trim() === "get:")!;

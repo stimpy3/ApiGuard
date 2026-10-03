@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.1
+
+- The editor checks the spec (breaking and freshness) and leaves out
+  conformance by default, since it needs the API running. Projects with
+  `runtime.url` set no longer end every check with "could not check".
+  Turn it on with `apiGuard.conformance`.
+- In a folder VS Code doesn't trust yet (Restricted Mode), VS Code now says
+  why API Guard is off instead of hiding it.
+
 ## 0.1.0
 
 First version.
