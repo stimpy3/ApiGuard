@@ -35,3 +35,24 @@ export function checkArgs(runner: "cli" | "docker", runtimeUrl: string | null): 
   }
   return args;
 }
+
+export interface AiSettings {
+  groqKey: string | undefined;
+  jenkinsUrl: string;
+  jenkinsJob: string;
+}
+
+/**
+ * Environment for the AI commands (ask, review --build, ask-review): the
+ * Groq key the person stored in VS Code, and where Jenkins is, translated
+ * like runtime.url when api-guard runs in Docker.
+ */
+export function aiEnv(runner: "cli" | "docker", ai: AiSettings): Record<string, string> {
+  const env: Record<string, string> = {};
+  if (ai.groqKey) env.GROQ_API_KEY = ai.groqKey;
+  if (ai.jenkinsUrl) {
+    env.JENKINS_URL = (runner === "docker" && urlForDocker(ai.jenkinsUrl)) || ai.jenkinsUrl;
+  }
+  if (ai.jenkinsJob) env.JENKINS_JOB = ai.jenkinsJob;
+  return env;
+}

@@ -112,6 +112,7 @@ def get_build_context(build_id: str) -> dict:
     try:
         info = json.loads(_fetch(f"{JENKINS_URL}/job/{JENKINS_JOB}/{build_id}/api/json"))
         context["jenkins"] = {
+            "number": info.get("number"),
             "result": info.get("result"),
             "building": info.get("building"),
             "url": info.get("url"),

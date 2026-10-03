@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterator
@@ -258,12 +258,12 @@ def list_reviews(*, state: Path = DEFAULT_STATE) -> list[Summary]:
     return sorted(newest_first, key=lambda s: s.status != "waiting")  # stable: waiting on top
 
 
-def show(review_id: str, *, state: Path = DEFAULT_STATE) -> str:
-    """The audit trail of one review, as text.
+def detail(review_id: str, *, state: Path = DEFAULT_STATE) -> dict:
+    """One review's saved record, as data (`review show --json`, the editor).
 
-    Built from the saved checkpoints: what the evidence was, what the model
-    said, every question and answer, and who decided what, when. Nothing here
-    is regenerated.
+    Built from the saved checkpoints: the evidence, what the model said,
+    every question and answer, and who decided what, when. Nothing here is
+    regenerated.
     """
     if not state.exists():
         raise ReviewError(f"no review state at {state}")
@@ -278,36 +278,66 @@ def show(review_id: str, *, state: Path = DEFAULT_STATE) -> str:
     v = snapshot.values
     s = _summary(review_id, snapshot, history)
     context = v.get("context") or {}
+    return {
+        **asdict(s),
+        "full_commit": str(context.get("commit", "")),
+        "branch": str(context.get("branch", "")),
+        "change_list": [
+            {key: c.get(key) for key in ("severity", "operation", "path", "text", "fingerprint")}
+            for c in v.get("changes") or []
+        ],
+        "rationale": v.get("rationale", ""),
+        "impact": v.get("impact", ""),
+        "migration": v.get("migration", ""),
+        "explain_model": v.get("explain_model", ""),
+        "qa": [
+            {"question": q.get("question", ""), "answer": q.get("answer", ""), "tools": list(q.get("tools") or [])}
+            for q in v.get("qa") or []
+        ],
+        "questions_left": max(0, workflow.MAX_QUESTIONS - s.questions_asked) if s.status == "waiting" else 0,
+        "decision": v.get("decision", ""),
+        "decided_by": v.get("decided_by", ""),
+        "reason": v.get("reason", ""),
+        "expires": str(v.get("expires", "") or ""),
+        "waiver_snippet": v.get("waiver_snippet", ""),
+        "checklist": list(v.get("checklist") or []),
+        "checkpoints": len(history),
+    }
+
+
+def show(review_id: str, *, state: Path = DEFAULT_STATE) -> str:
+    """The audit trail of one review, as text (see detail())."""
+    d = detail(review_id, state=state)
     lines = [
-        f"Review {review_id}: {s.status.upper()}",
-        f"  started  {s.started}",
-        f"  updated  {s.updated}",
-        f"  commit   {context.get('commit', '-')}   branch {context.get('branch', '-')}",
+        f"Review {review_id}: {d['status'].upper()}",
+        f"  started  {d['started']}",
+        f"  updated  {d['updated']}",
+        f"  commit   {d['full_commit'] or '-'}   branch {d['branch'] or '-'}",
         "",
-        f"Evidence (rules): verdict {v.get('verdict')}, {s.changes} change(s)",
+        f"Evidence (rules): verdict {d['verdict']}, {d['changes']} change(s)",
     ]
-    for c in v.get("changes") or []:
-        lines.append(f"  - [{c.get('severity', 'ERR')}] {c.get('operation') or ''} {c.get('path') or ''}: "
+    for c in d["change_list"]:
+        lines.append(f"  - [{c.get('severity') or 'ERR'}] {c.get('operation') or ''} {c.get('path') or ''}: "
                      f"{c.get('text')} (fingerprint {c.get('fingerprint')})")
-    lines += ["", f"Triage (model): {v.get('band', '-')} - {v.get('rationale', '')}"]
-    if v.get("impact"):
-        lines += [f"Explanation (model: {v.get('explain_model')}):",
-                  f"  What breaks: {v.get('impact')}",
-                  f"  Safer route: {v.get('migration')}"]
-    for i, item in enumerate(v.get("qa") or [], 1):
-        tools = f" [tools: {', '.join(item['tools'])}]" if item.get("tools") else ""
-        lines += ["", f"Question {i}: {item.get('question')}", f"  Answer (model){tools}: {item.get('answer')}"]
+    lines += ["", f"Triage (model): {d['band'] or '-'} - {d['rationale']}"]
+    if d["impact"]:
+        lines += [f"Explanation (model: {d['explain_model']}):",
+                  f"  What breaks: {d['impact']}",
+                  f"  Safer route: {d['migration']}"]
+    for i, item in enumerate(d["qa"], 1):
+        tools = f" [tools: {', '.join(item['tools'])}]" if item["tools"] else ""
+        lines += ["", f"Question {i}: {item['question']}", f"  Answer (model){tools}: {item['answer']}"]
     lines.append("")
-    if v.get("decision") == "approve":
-        lines += [f"Decision: APPROVED by {v.get('decided_by')}", f"  reason:  {v.get('reason')}",
-                  f"  waiver expires {v.get('expires')}"]
-    elif v.get("decision") == "reject":
-        lines += [f"Decision: REJECTED by {v.get('decided_by')}", f"  reason: {v.get('reason')}"]
-    elif s.status == "waiting":
-        lines.append(f"Decision: waiting ({workflow.MAX_QUESTIONS - s.questions_asked} question(s) left)")
+    if d["decision"] == "approve":
+        lines += [f"Decision: APPROVED by {d['decided_by']}", f"  reason:  {d['reason']}",
+                  f"  waiver expires {d['expires']}"]
+    elif d["decision"] == "reject":
+        lines += [f"Decision: REJECTED by {d['decided_by']}", f"  reason: {d['reason']}"]
+    elif d["status"] == "waiting":
+        lines.append(f"Decision: waiting ({d['questions_left']} question(s) left)")
     else:
         lines.append("Decision: none needed (the build was not blocked)")
-    lines.append(f"\n{len(history)} saved checkpoint(s).")
+    lines.append(f"\n{d['checkpoints']} saved checkpoint(s).")
     return "\n".join(lines)
 
 

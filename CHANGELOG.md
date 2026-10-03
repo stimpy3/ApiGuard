@@ -5,6 +5,22 @@ Semver tags mean nothing to a consumer without this file: someone pinning
 
 ## [Unreleased]
 
+### The API Guard panel (VS Code extension 0.2.0)
+
+- One window in VS Code with every feature: **Overview** (headline, checks,
+  changes, *Accept this break*, waivers), **Set up** (`init` with a preview of
+  each file, the CI to set up, or the steps to add a spec), **Ask** (our agent
+  on the person's own Groq key, stored in VS Code's secret storage and passed
+  to api-guard only as an environment variable) and **Reviews** (start one from
+  a Jenkins build, approve and add the waiver to `waivers.yaml`, reject, ask).
+- `--json` on `ask`, `review list`, `review show`, `review --build`, `approve`,
+  `reject` and `ask-review`: one JSON document on stdout, refusals included
+  (`{"error": ...}`, exit 2). `init --dry-run --json` adds a `preview` of each
+  file it would write.
+- `ask` understands "the last build": the agent may use Jenkins' `lastBuild`,
+  `lastFailedBuild` and `lastSuccessfulBuild`, and `get_build_context` now
+  reports the real build number. Before, it asked which build.
+
 ### VS Code extension (vscode/, 0.1.0)
 
 - The editor front end: status bar headline, squiggles on the spec and the

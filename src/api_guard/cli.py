@@ -162,6 +162,10 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     review.add_argument("--job", default=None, help="Jenkins job path, for --build.")
+    review.add_argument(
+        "--json", action="store_true",
+        help="With list, show or --build: print the result as JSON (for tools such as the VS Code extension).",
+    )
 
     approve = sub.add_parser(
         "approve",
@@ -205,6 +209,7 @@ def main(argv: list[str] | None = None) -> int:
 
     for decision in (approve, reject, ask_review):
         decision.add_argument("--state", type=Path, default=None, help="Same file as `review --state`.")
+        decision.add_argument("--json", action="store_true", help="Print the outcome as JSON.")
         decision.add_argument(
             "--report-dir",
             type=Path,
@@ -229,6 +234,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     ask.add_argument("--jenkins-url", default=None, help="Default: $JENKINS_URL or http://localhost:8081.")
+    ask.add_argument("--json", action="store_true", help="Print the answer as JSON.")
 
     ui = sub.add_parser("ui", help="Open a web page for `ask` (needs the ui extra: streamlit).")
     ui.add_argument("--port", type=int, default=8501)
@@ -239,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
         return _ui(args.port)
 
     if args.command == "ask":
-        return _ask(" ".join(args.question), job=args.job, jenkins_url=args.jenkins_url)
+        return _ask(" ".join(args.question), job=args.job, jenkins_url=args.jenkins_url, as_json=args.json)
 
     if args.command in ("approve", "reject", "ask-review"):
         return _decide(args)
@@ -252,7 +258,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "review" and args.action:
         if args.action == "show" and not args.target:
             parser.error("review show needs a review id: api-guard review show 42")
-        return _review_query(args.action, args.target, args.state)
+        return _review_query(args.action, args.target, args.state, as_json=args.json)
 
     if args.command == "review" and args.build:
         return _review_archived(args)
@@ -605,10 +611,24 @@ def _decide(args) -> int:
         else:
             outcome = workflow.ask(args.review_id, " ".join(args.question), state=state)
     except workflow.ReviewError as exc:
+        if args.json:
+            return _json_error(str(exc))
         print(f"api-guard: {exc}", file=sys.stderr)
         return EXIT_TOOL_ERROR
 
     request = args.report_dir / "approval-request.md"
+    if args.json:
+        from dataclasses import asdict
+
+        if outcome.paused:
+            _write_request(args.report_dir, outcome)
+        else:
+            request.unlink(missing_ok=True)
+            out = args.report_dir / "review.md"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(outcome.report, encoding="utf-8")
+        _print_json(asdict(outcome))
+        return 0
     if outcome.paused:
         # A question: the review is waiting again, and the request now
         # carries the answer, so CI shows it in the next form.
@@ -658,10 +678,17 @@ def _review_archived(args) -> int:
     try:
         outcome = workflow.start_archived(args.build, state=state, review_id=args.review_id)
     except workflow.ReviewError as exc:
+        if args.json:
+            return _json_error(f"review not started: {exc}")
         print(f"api-guard: review not started: {exc}", file=sys.stderr)
         return EXIT_TOOL_ERROR
 
     _reconfigure_stdout()
+    if args.json:
+        from dataclasses import asdict
+
+        _print_json(asdict(outcome))
+        return 0
     if outcome.paused:
         print(f"Review {outcome.review_id} (archived build {args.build}) is waiting for a decision.\n")
         print(outcome.question)
@@ -671,7 +698,7 @@ def _review_archived(args) -> int:
     return 0
 
 
-def _review_query(action: str, review_id: str | None, state: Path | None) -> int:
+def _review_query(action: str, review_id: str | None, state: Path | None, *, as_json: bool = False) -> int:
     """`review list` and `review show ID`: read-only views of the saved reviews."""
     try:
         from api_guard.ai import review as workflow
@@ -683,12 +710,23 @@ def _review_query(action: str, review_id: str | None, state: Path | None) -> int
     _reconfigure_stdout()
     try:
         if action == "show":
-            print(workflow.show(review_id, state=state))
+            if as_json:
+                _print_json(workflow.detail(review_id, state=state))
+            else:
+                print(workflow.show(review_id, state=state))
             return 0
         reviews = workflow.list_reviews(state=state)
     except workflow.ReviewError as exc:
+        if as_json:
+            return _json_error(str(exc))
         print(f"api-guard: {exc}", file=sys.stderr)
         return EXIT_TOOL_ERROR
+
+    if as_json:
+        from dataclasses import asdict
+
+        _print_json({"state": str(state), "reviews": [asdict(r) for r in reviews]})
+        return 0
 
     if not reviews:
         print(f"No reviews in {state}.")
@@ -709,19 +747,47 @@ def _reconfigure_stdout() -> None:
         pass
 
 
-def _ask(question: str, *, job: str | None, jenkins_url: str | None) -> int:
+def _print_json(data) -> None:
+    import json
+
+    print(json.dumps(data, indent=2, default=str))
+
+
+def _json_error(message: str) -> int:
+    """With --json, a refusal is JSON on stdout too, so a tool reads one stream."""
+    _print_json({"error": message})
+    return EXIT_TOOL_ERROR
+
+
+def _ask(question: str, *, job: str | None, jenkins_url: str | None, as_json: bool = False) -> int:
     """Answer a question about past builds. Exit 0 with an answer, 2 otherwise."""
     try:
         from api_guard.ai import agent
     except ImportError:
-        print("api-guard: ask needs the AI extra: pip install 'api-guard[ai]'", file=sys.stderr)
+        message = "ask needs the AI extra: pip install 'api-guard[ai]'"
+        if as_json:
+            return _json_error(message)
+        print(f"api-guard: {message}", file=sys.stderr)
         return EXIT_TOOL_ERROR
 
     try:
         answer = agent.ask(question, job=job, jenkins_url=jenkins_url)
     except agent.AskError as exc:
+        if as_json:
+            return _json_error(str(exc))
         print(f"api-guard: {exc}", file=sys.stderr)
         return EXIT_TOOL_ERROR
+
+    if as_json:
+        _print_json({
+            "text": answer.text,
+            "steps": answer.steps,
+            "confidence": answer.confidence,
+            "confidence_reason": answer.confidence_reason,
+            "warnings": answer.warnings,
+            "caution": answer.CAUTION,
+        })
+        return 0
 
     # Model output contains typographic characters (narrow spaces, dashes) that
     # a Windows cp1252 console cannot encode. Degrade them, don't crash on them.

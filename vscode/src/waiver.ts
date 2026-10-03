@@ -76,3 +76,35 @@ export function appendWaiver(existing: string, entry: Record<string, string>): s
   }
   return text + block;
 }
+
+/**
+ * Add the entries of an approval's waiver snippet (api-guard's YAML list) to
+ * waivers.yaml, skipping fingerprints already there.
+ */
+export function appendSnippet(
+  existing: string,
+  snippet: string,
+): { text: string; added: string[]; skipped: string[] } {
+  const entries = parseDocument(snippet).toJS();
+  if (!Array.isArray(entries)) {
+    throw new Error("the approval's waiver snippet is not a YAML list");
+  }
+  const have = waivedFingerprints(existing);
+  const added: string[] = [];
+  const skipped: string[] = [];
+  let text = existing;
+  for (const entry of entries) {
+    const fp = String(entry?.fingerprint ?? "");
+    if (!fp) continue;
+    if (have.has(fp)) {
+      skipped.push(fp);
+      continue;
+    }
+    const clean: Record<string, string> = {};
+    for (const [k, v] of Object.entries(entry)) clean[k] = String(v);
+    text = appendWaiver(text, clean);
+    have.add(fp);
+    added.push(fp);
+  }
+  return { text, added, skipped };
+}

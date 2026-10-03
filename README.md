@@ -42,20 +42,26 @@ person ever types is a name and a reason, when accepting a break on purpose.
 
 ### In VS Code
 
-Prefer buttons to commands? The **API Guard extension** (in `vscode/`) shows the
-same results inside the editor, from the same api-guard run CI uses:
+Prefer buttons to commands? The **API Guard extension** (in `vscode/`) does
+everything in this guide from inside the editor, with the same api-guard run CI
+uses. Its **API Guard panel** (click the status bar item, or *API Guard: Open
+API Guard*) is one window with four tabs:
 
-- a status bar headline (`API: OK` / `API: 3 breaking`), checked again on save
-- each breaking change **underlined on its line** in the spec, and in Problems
-- *Set up API Guard*, which runs `init` (and shows the steps to add a spec if
-  there isn't one)
-- a lightbulb **"Accept this break"** that writes the waiver into
-  `waivers.yaml` for you: you only type your name and a reason
-- a sidebar with every check, change and waiver
+| Tab | What you do there |
+|---|---|
+| **Overview** | See the headline, each check and every change; *Show in spec*; *Accept this break* writes the waiver into `waivers.yaml` (you type a name and a reason) |
+| **Set up** | `init`, visually: what was found (spec, framework, CI), a preview of every file before it's written, the CI to set up, or the steps to add a spec for your stack, with copy buttons |
+| **Ask** | Ask our agent about past builds, on your free Groq key (stored encrypted by VS Code, typed by you into VS Code's prompt). Shows the tools it used, its confidence and any warnings |
+| **Reviews** | Saved reviews; start one from a Jenkins build number; approve (then *Add to waivers.yaml*), reject, or ask the agent first |
+
+Around the editor it also keeps a status bar headline (`API: OK` /
+`API: 3 breaking`) checked again on save, **underlines each breaking change on
+its line** in the spec (and in Problems) with a lightbulb *Accept this break*,
+and a sidebar.
 
 It needs Docker or the `api-guard` command. Until it's on the Marketplace,
 install the packaged file: Extensions view → `…` → *Install from VSIX…* →
-`api-guard-0.1.0.vsix` (built by `npm run package` in `vscode/`, or downloaded
+`api-guard-0.2.0.vsix` (built by `npm run package` in `vscode/`, or downloaded
 from the CI run's artifacts).
 
 Read on, top to bottom, for how it all works: each section builds on the one
@@ -1338,6 +1344,7 @@ spec yet (it printed what to add, and wrote nothing).
 | `ask --job` | `api-guard ask "did build 1 fail conformance?" --job 'sample-api-local/job/main'` | The build is in another Jenkins job (branch names with `/` need `%252F`) |
 | `ask` (local) | `api-guard ask "what failed in build local?"` | Asking about `result.json` in the current folder |
 | `ui` | `api-guard ui` | A browser page at http://localhost:8501 with two tabs: `ask`, and "Pending reviews" (approve / reject / ask buttons) |
+| `--json` | `api-guard ask "why did build 42 fail?" --json` | A tool reads the answer (the VS Code panel does). Also on `init`, `review list`/`show`/`--build`, `approve`, `reject`, `ask-review`; a refusal is `{"error": ...}` with exit 2 |
 
 ### Approval
 
@@ -1427,8 +1434,9 @@ api-guard/
 │       ├── mcp_server.py   the 8 read-only tools
 │       └── ui.py           the web page
 ├── tests/                  includes the "AI can't touch the verdict" tests
-├── vscode/                 the VS Code extension (TypeScript): status bar,
-│                           squiggles, set up, "accept this break", sidebar
+├── vscode/                 the VS Code extension (TypeScript): the API Guard
+│                           panel (overview, set up, ask, reviews), status bar,
+│                           squiggles, "accept this break", sidebar
 ├── action.yml              the GitHub Action
 ├── Dockerfile              the images
 └── jenkins/vars/           a Jenkins shared-library step
@@ -1450,8 +1458,10 @@ Stated plainly, so nobody discovers them the hard way:
   Django REST framework; for Spring and NestJS it explains what to add; for
   others, freshness stays off until you add a command.
 - **The VS Code extension isn't on the Marketplace yet.** It installs from the
-  `.vsix` file. It doesn't yet show pending reviews or the `ask` agent (the web
-  page still does).
+  `.vsix` file. Its Reviews tab shows the reviews saved in the project
+  (`.api-guard/reviews.db`): ones started there, or by `api-guard review` run
+  in that folder. A review paused inside a CI job lives in that job's
+  workspace, so it's decided from the CI (or `api-guard ui` there).
 - **The breaking check needs oasdiff**, which the Docker image has. Locally
   without it, 13 tests are skipped. CI runs them inside the image.
 

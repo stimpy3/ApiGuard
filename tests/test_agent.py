@@ -309,3 +309,26 @@ def test_missing_key_is_a_plain_error(monkeypatch) -> None:
     monkeypatch.setattr("api_guard.ai.llm.api_key", lambda: None)
     with pytest.raises(agent.AskError, match="GROQ_API_KEY"):
         agent.ask("why did build 1 fail?")
+
+
+def test_cli_ask_json(monkeypatch, capsys) -> None:
+    """`ask --json` is what the VS Code panel reads: the answer and every caveat."""
+    import json
+
+    from api_guard import cli
+
+    monkeypatch.setattr(agent, "ask", lambda q, **kw: agent.Answer(
+        text="Build 3 removed email.", steps=["get_spec_diff"], confidence="medium",
+        confidence_reason="one build read", warnings=["`phone` not found in tool output"],
+    ))
+    assert cli.main(["ask", "why", "did", "it", "fail", "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["text"] == "Build 3 removed email." and data["steps"] == ["get_spec_diff"]
+    assert data["warnings"] and data["caution"] == agent.Answer.CAUTION
+
+    def refuse(q, **kw):
+        raise agent.AskError("GROQ_API_KEY is not set")
+
+    monkeypatch.setattr(agent, "ask", refuse)
+    assert cli.main(["ask", "anything", "--json"]) == 2
+    assert json.loads(capsys.readouterr().out) == {"error": "GROQ_API_KEY is not set"}

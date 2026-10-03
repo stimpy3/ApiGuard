@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.0
+
+- **The API Guard panel**: one window with every feature. Open it from the
+  status bar, the sidebar's shield button, or *API Guard: Open API Guard*.
+  - **Overview**: the headline, each check, every change with *Show in spec*
+    and *Accept this break* (an inline form that writes the waiver), accepted
+    breaks, and expired waivers to clean up.
+  - **Set up**: `api-guard init` visually. What was found, a preview of every
+    file before anything is written, a CI picker, *Replace files that already
+    exist*, the Jenkins stage to copy, or, with no spec yet, the steps for your
+    stack with copy buttons.
+  - **Ask**: our agent on your free Groq key, about past Jenkins builds. You
+    paste the key into VS Code's own prompt; it's kept in VS Code's encrypted
+    secret storage and reaches api-guard only as an environment variable.
+  - **Reviews**: saved reviews, start one from a Jenkins build number, approve
+    (then *Add to waivers.yaml*), reject, or ask the agent first.
+- *Set up* (command and buttons) now opens the panel's Set up tab.
+- Clicking the status bar opens the panel.
+- New settings: `apiGuard.aiDockerImage`, `apiGuard.jenkinsUrl`,
+  `apiGuard.jenkinsJob`.
+
 ## 0.1.2
 
 - Conformance is checked when your API is running, and simply "not

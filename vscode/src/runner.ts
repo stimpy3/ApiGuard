@@ -27,12 +27,24 @@ export class RunnerMissing extends Error {}
 
 const cache = new Map<string, boolean>();
 
-function exec(file: string, args: string[], cwd: string, timeoutMs: number): Promise<RunOutput> {
+function exec(
+  file: string,
+  args: string[],
+  cwd: string,
+  timeoutMs: number,
+  env?: Record<string, string>,
+): Promise<RunOutput> {
   return new Promise((resolve) => {
     execFile(
       file,
       args,
-      { cwd, timeout: timeoutMs, maxBuffer: 20 * 1024 * 1024, windowsHide: true },
+      {
+        cwd,
+        timeout: timeoutMs,
+        maxBuffer: 20 * 1024 * 1024,
+        windowsHide: true,
+        env: env ? { ...process.env, ...env } : undefined,
+      },
       (error, stdout, stderr) => {
         const code =
           error && typeof (error as any).code === "number" ? (error as any).code : error ? 127 : 0;
@@ -67,16 +79,30 @@ export async function resolveRunner(settings: RunnerSettings, cwd: string): Prom
   );
 }
 
+export interface RunOptions {
+  /** The image instead of settings.dockerImage (the AI features need the -ai one). */
+  image?: string;
+  /**
+   * Environment for api-guard. Values travel in the process environment, and
+   * Docker gets only the names (`-e NAME`), so a key never appears in a
+   * command line or the log.
+   */
+  env?: Record<string, string>;
+  timeoutMs?: number;
+}
+
 /** Run `api-guard <args>` in the project folder, by whichever runner applies. */
 export async function runApiGuard(
   settings: RunnerSettings,
   projectRoot: string,
   args: string[],
-  timeoutMs = 15 * 60_000,
+  options: RunOptions = {},
 ): Promise<RunOutput> {
+  const timeoutMs = options.timeoutMs ?? 15 * 60_000;
+  const env = options.env;
   const kind = await resolveRunner(settings, projectRoot);
   if (kind === "cli") {
-    return exec(settings.cliPath, args, projectRoot, timeoutMs);
+    return exec(settings.cliPath, args, projectRoot, timeoutMs, env);
   }
   // The project is mounted at /work, the same layout as the CI one-liner, so
   // paths in result.json are the same relative paths CI would report.
@@ -87,11 +113,13 @@ export async function runApiGuard(
       // So host.docker.internal reaches this machine on Linux too (Docker
       // Desktop provides it already); used to reach an API running locally.
       "--add-host=host.docker.internal:host-gateway",
+      ...Object.keys(env ?? {}).flatMap((name) => ["-e", name]),
       "-v", `${projectRoot}:/work`, "-w", "/work",
-      settings.dockerImage, ...args,
+      options.image ?? settings.dockerImage, ...args,
     ],
     projectRoot,
     timeoutMs,
+    env,
   );
 }
 

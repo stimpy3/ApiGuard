@@ -195,6 +195,19 @@ def test_init_dry_run_writes_nothing(tmp_path: Path) -> None:
     assert not (root / ".gitignore").exists()
 
 
+def test_init_dry_run_json_previews_the_files(tmp_path: Path, capsys) -> None:
+    """The editor's Set up tab shows what each file would contain."""
+    import json
+
+    root = _fastapi_project(tmp_path)
+    assert cli.main(["init", "--dir", str(root), "--dry-run", "--json"]) == 0
+    info = json.loads(capsys.readouterr().out)
+    assert info["dry_run"] and "api-guard.yaml" in info["written"]
+    assert "spec:" in info["preview"]["api-guard.yaml"]
+    assert set(info["preview"]) == set(info["written"])
+    assert not (root / "api-guard.yaml").exists()
+
+
 def test_init_gitignore_lines_are_added_once(tmp_path: Path) -> None:
     root = _fastapi_project(tmp_path)
     cli.main(["init", "--dir", str(root)])

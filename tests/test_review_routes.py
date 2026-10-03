@@ -253,3 +253,34 @@ def test_cli_review_show_and_list(paused: Path, capsys) -> None:
     assert cli.main(["review", "show", "42", "--state", str(paused)]) == 0
     assert "Review 42: WAITING" in capsys.readouterr().out
     assert cli.main(["review", "show", "nope", "--state", str(paused)]) == 2
+
+
+def test_cli_json_for_the_editor(paused: Path, tmp_path: Path, capsys) -> None:
+    """The VS Code panel reads these; one JSON document on stdout, errors too."""
+    import json
+
+    from api_guard import cli
+
+    assert cli.main(["review", "list", "--json", "--state", str(paused)]) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert [(r["review_id"], r["status"]) for r in listed["reviews"]] == [("42", "waiting")]
+
+    assert cli.main(["review", "show", "42", "--json", "--state", str(paused)]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["status"] == "waiting" and shown["questions_left"] == graph.MAX_QUESTIONS
+    assert [c["fingerprint"] for c in shown["change_list"]] == ["abc123", "warn99"]
+    assert shown["branch"] == "demo/rename"
+
+    assert cli.main(["review", "show", "nope", "--json", "--state", str(paused)]) == 2
+    assert "nope" in json.loads(capsys.readouterr().out)["error"]
+
+    report_dir = tmp_path / "out"
+    assert cli.main(["approve", "42", "--by", "sohan", "--reason", REASON, "--json",
+                     "--state", str(paused), "--report-dir", str(report_dir)]) == 0
+    approved = json.loads(capsys.readouterr().out)
+    assert approved["decision"] == "approve" and "abc123" in approved["waiver_snippet"]
+    assert (report_dir / "review.md").exists()
+
+    assert cli.main(["reject", "42", "--by", "sohan", "--reason", REASON, "--json",
+                     "--state", str(paused)]) == 2
+    assert "not waiting" in json.loads(capsys.readouterr().out)["error"]

@@ -4,11 +4,11 @@
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import { parseDocument } from "yaml";
-import { checkArgs, urlForDocker } from "../src/args";
+import { aiEnv, checkArgs, urlForDocker } from "../src/args";
 import { readConfig } from "../src/config";
 import { locate } from "../src/locate";
 import { blockingChanges, headline, parseResult, statusText } from "../src/result";
-import { appendWaiver, expiryDate, validateReason, waivedFingerprints, waiverEntry } from "../src/waiver";
+import { appendSnippet, appendWaiver, expiryDate, validateReason, waivedFingerprints, waiverEntry } from "../src/waiver";
 
 // Sorted keys, like sample-api's spec: paths come after a components block.
 const YAML_SPEC = `components:
@@ -164,4 +164,34 @@ test("settings come from api-guard.yaml when present", () => {
   const c = readConfig("spec:\n  path: x.yaml\npolicy:\n  waivers: w.yaml\n  max_waiver_days: 30\nreport:\n  dir: out\n");
   assert.deepEqual([c.reportDir, c.waiversFile, c.maxWaiverDays], ["out", "w.yaml", 30]);
   assert.equal(readConfig("spec:\n  path: x.yaml\n").waiversFile, null, "a config without a waivers file says so");
+});
+
+test("the AI commands get the key and Jenkins, translated for Docker", () => {
+  const ai = { groqKey: "k", jenkinsUrl: "http://localhost:8081", jenkinsJob: "" };
+  assert.deepEqual(aiEnv("docker", ai), { GROQ_API_KEY: "k", JENKINS_URL: "http://host.docker.internal:8081" });
+  assert.deepEqual(aiEnv("cli", { ...ai, jenkinsJob: "sample-api" }), {
+    GROQ_API_KEY: "k", JENKINS_URL: "http://localhost:8081", JENKINS_JOB: "sample-api",
+  });
+  assert.deepEqual(aiEnv("docker", { groqKey: undefined, jenkinsUrl: "https://ci.example.com", jenkinsJob: "" }), {
+    JENKINS_URL: "https://ci.example.com",
+  });
+});
+
+test("an approval's waiver snippet is added to waivers.yaml once", () => {
+  const snippet = [
+    "- fingerprint: abc123",
+    "  id: response-required-property-removed",
+    "  reason: PROD-142 both apps migrated",
+    "  approved_by: sohan",
+    "  expires: 2026-11-03",
+    "",
+  ].join("\n");
+  const first = appendSnippet("# waivers\n", snippet);
+  assert.deepEqual(first.added, ["abc123"]);
+  const data = parseDocument(first.text).toJS();
+  assert.equal(data[0].expires, "2026-11-03");
+  assert.match(first.text, /^# waivers/);
+  const again = appendSnippet(first.text, snippet);
+  assert.deepEqual([again.added, again.skipped], [[], ["abc123"]]);
+  assert.equal(again.text, first.text);
 });

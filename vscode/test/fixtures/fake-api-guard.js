@@ -10,12 +10,53 @@ const path = require("path");
 const args = process.argv.slice(2);
 if (args[0] === "--help") process.exit(0);
 
+const json = (data, code = 0) => {
+  process.stdout.write(JSON.stringify(data));
+  process.exit(code);
+};
+
+// What the AI commands received, so tests can check the key arrives in the
+// environment and never on the command line.
+if (["ask", "review", "approve", "reject", "ask-review"].includes(args[0])) {
+  fs.mkdirSync("api-guard-report", { recursive: true });
+  fs.appendFileSync(path.join("api-guard-report", "ai-calls.jsonl"), JSON.stringify({
+    args, hasKey: Boolean(process.env.GROQ_API_KEY), jenkins: process.env.JENKINS_URL || null,
+  }) + "\n");
+}
+
 if (args[0] === "init") {
-  process.stdout.write(JSON.stringify({
-    status: "set_up", exit_code: 0, text: "api-guard init\n", spec: "openapi.yaml",
-    written: ["waivers.yaml"], kept: ["api-guard.yaml"], create_spec_cmd: null, jenkins_stage: null,
-  }));
-  process.exit(0);
+  const dry = args.includes("--dry-run");
+  json({
+    status: "set_up", exit_code: 0, text: "api-guard init\n", spec: "openapi.yaml", spec_exists: true,
+    framework: null, generate_cmd: null, base_branch: "main", ci: args.includes("jenkins") ? ["jenkins"] : [],
+    checks: { breaking: true, freshness: false, conformance: false },
+    written: ["waivers.yaml"], kept: ["api-guard.yaml"], gitignore_added: [], create_spec_cmd: null,
+    jenkins_stage: args.includes("jenkins") ? "stage('API contract') {}" : null,
+    dry_run: dry, preview: dry ? { "waivers.yaml": "# waivers\n" } : {},
+  });
+}
+
+if (args[0] === "ask") {
+  json({ text: `Answer to: ${args[1]}`, steps: ["get_report"], confidence: "high", confidence_reason: "read it",
+    warnings: [], caution: "Written by a language model." });
+}
+
+const REVIEW = {
+  review_id: "42", status: "waiting", verdict: "failed", band: "risky", changes: 1, commit: "94cf4b0",
+  question: "", questions_asked: 0, started: "", updated: "2026-10-04T10:00:00", full_commit: "94cf4b0c9573",
+  branch: "demo/rename",
+  change_list: [{ severity: "ERR", operation: "GET", path: "/users", text: "removed `email`", fingerprint: "ccc333ccc333" }],
+  rationale: "", impact: "", migration: "", explain_model: "", qa: [], questions_left: 5, decision: "",
+  decided_by: "", reason: "", expires: "", waiver_snippet: "", checklist: [], checkpoints: 3,
+};
+if (args[0] === "review" && args[1] === "list") json({ state: ".api-guard/reviews.db", reviews: [REVIEW] });
+if (args[0] === "review" && args[1] === "show") json(REVIEW);
+if (args[0] === "approve") {
+  json({
+    review_id: args[1], paused: false, decision: "approve", approved_by: args[args.indexOf("--by") + 1],
+    waiver_snippet: "- fingerprint: ccc333ccc333\n  reason: PROD-142 both apps migrated\n  approved_by: sohan\n  expires: '2026-11-03'\n",
+    report: "", question: "", answer: "", checklist: [],
+  });
 }
 
 if (args[0] === "check") {

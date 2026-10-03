@@ -2,7 +2,7 @@
   "name": "api-guard",
   "displayName": "API Guard",
   "description": "See API changes that would break your clients while you edit, before CI blocks them.",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "publisher": "sohanbhadalkar",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -14,8 +14,19 @@
   "engines": {
     "vscode": "^1.90.0"
   },
-  "categories": ["Linters", "Other"],
-  "keywords": ["openapi", "api", "breaking changes", "contract", "swagger"],
+  "categories": [
+    "Linters",
+    "Other"
+  ],
+  "keywords": [
+    "openapi",
+    "api",
+    "breaking changes",
+    "contract",
+    "swagger",
+    "jenkins",
+    "groq"
+  ],
   "main": "./out/src/extension.js",
   "capabilities": {
     "untrustedWorkspaces": {
@@ -30,36 +41,103 @@
   ],
   "contributes": {
     "commands": [
-      { "command": "apiGuard.check", "title": "Check the API contract", "category": "API Guard", "icon": "$(refresh)" },
-      { "command": "apiGuard.init", "title": "Set up API Guard in this project", "category": "API Guard", "icon": "$(gear)" },
-      { "command": "apiGuard.acceptBreak", "title": "Accept this break (add a waiver)", "category": "API Guard" },
-      { "command": "apiGuard.openReport", "title": "Open the full report", "category": "API Guard", "icon": "$(book)" },
-      { "command": "apiGuard.showOutput", "title": "Show the log", "category": "API Guard" }
+      {
+        "command": "apiGuard.openPanel",
+        "title": "Open API Guard",
+        "category": "API Guard",
+        "icon": "$(shield)"
+      },
+      {
+        "command": "apiGuard.check",
+        "title": "Check the API contract",
+        "category": "API Guard",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "apiGuard.init",
+        "title": "Set up API Guard in this project",
+        "category": "API Guard",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "apiGuard.ask",
+        "title": "Ask about past builds",
+        "category": "API Guard",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "apiGuard.reviews",
+        "title": "Pending reviews",
+        "category": "API Guard"
+      },
+      {
+        "command": "apiGuard.acceptBreak",
+        "title": "Accept this break (add a waiver)",
+        "category": "API Guard"
+      },
+      {
+        "command": "apiGuard.openReport",
+        "title": "Open the full report",
+        "category": "API Guard",
+        "icon": "$(book)"
+      },
+      {
+        "command": "apiGuard.showOutput",
+        "title": "Show the log",
+        "category": "API Guard"
+      }
     ],
     "menus": {
       "view/title": [
-        { "command": "apiGuard.check", "when": "view == apiGuard.results", "group": "navigation@1" },
-        { "command": "apiGuard.openReport", "when": "view == apiGuard.results", "group": "navigation@2" },
-        { "command": "apiGuard.init", "when": "view == apiGuard.results", "group": "navigation@3" }
+        {
+          "command": "apiGuard.openPanel",
+          "when": "view == apiGuard.results",
+          "group": "navigation@0"
+        },
+        {
+          "command": "apiGuard.check",
+          "when": "view == apiGuard.results",
+          "group": "navigation@1"
+        },
+        {
+          "command": "apiGuard.openReport",
+          "when": "view == apiGuard.results",
+          "group": "navigation@2"
+        },
+        {
+          "command": "apiGuard.init",
+          "when": "view == apiGuard.results",
+          "group": "navigation@3"
+        }
       ],
       "commandPalette": [
-        { "command": "apiGuard.acceptBreak", "when": "false" }
+        {
+          "command": "apiGuard.acceptBreak",
+          "when": "false"
+        }
       ]
     },
     "viewsContainers": {
       "activitybar": [
-        { "id": "apiGuard", "title": "API Guard", "icon": "media/shield.svg" }
+        {
+          "id": "apiGuard",
+          "title": "API Guard",
+          "icon": "media/shield.svg"
+        }
       ]
     },
     "views": {
       "apiGuard": [
-        { "id": "apiGuard.results", "name": "Contract" }
+        {
+          "id": "apiGuard.results",
+          "name": "Contract"
+        }
       ]
     },
     "viewsWelcome": [
       {
         "view": "apiGuard.results",
-        "contents": "Check whether your API changes would break the apps that use it.\n[Check the API contract](command:apiGuard.check)\nFirst time in this project?\n[Set up API Guard](command:apiGuard.init)"
+        "contents": "Check whether your API changes would break the apps that use it.\n[Open API Guard](command:apiGuard.openPanel)\n[Check the API contract](command:apiGuard.check)\nFirst time in this project?\n[Set up API Guard](command:apiGuard.init)"
       }
     ],
     "configuration": {
@@ -67,7 +145,11 @@
       "properties": {
         "apiGuard.runner": {
           "type": "string",
-          "enum": ["auto", "cli", "docker"],
+          "enum": [
+            "auto",
+            "cli",
+            "docker"
+          ],
           "default": "auto",
           "enumDescriptions": [
             "Use the api-guard command if it is installed, otherwise Docker",
@@ -90,6 +172,21 @@
           "type": "boolean",
           "default": true,
           "description": "Check again when the spec, api-guard.yaml or waivers.yaml is saved."
+        },
+        "apiGuard.aiDockerImage": {
+          "type": "string",
+          "default": "sohanbhadalkar/api-guard:1-ai",
+          "description": "The api-guard image with the AI features, for Ask and Reviews with the docker runner."
+        },
+        "apiGuard.jenkinsUrl": {
+          "type": "string",
+          "default": "http://localhost:8081",
+          "description": "Where Jenkins is, for Ask and for reviewing a Jenkins build. localhost is reached from Docker automatically."
+        },
+        "apiGuard.jenkinsJob": {
+          "type": "string",
+          "default": "",
+          "description": "The Jenkins job path, for Ask and reviewing a build (empty: api-guard default). For a multibranch job: my-api/job/main"
         }
       }
     }

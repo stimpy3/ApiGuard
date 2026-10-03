@@ -2,8 +2,9 @@
 //
 // It runs the same api-guard CI runs (the installed command or the Docker
 // image) and shows the result where the developer already is: a status bar
-// headline, squiggles on the spec, the Problems panel, a sidebar, a guided
-// setup, and a quick fix that writes the waiver when a break is intended.
+// headline, squiggles on the spec, the Problems panel, a sidebar, a quick fix
+// that writes the waiver when a break is intended, and the API Guard panel
+// (panel.ts) with every feature in one window: overview, set up, ask, reviews.
 // Nothing here decides anything; api-guard's result.json is the answer.
 
 import * as fs from "fs";
@@ -15,6 +16,7 @@ import { locate } from "./locate";
 import { blockingChanges, Change, headline, parseResult, RunResult, statusText } from "./result";
 import { checkArgs } from "./args";
 import { resolveRunner, RunnerMissing, RunnerSettings, runApiGuard } from "./runner";
+import { GuardPanel, PanelHost, Tab } from "./panel";
 import { Located, ResultsTree } from "./tree";
 import { appendWaiver, validateReason, waivedFingerprints, waiverEntry } from "./waiver";
 
@@ -27,6 +29,8 @@ let status: vscode.StatusBarItem;
 let tree: ResultsTree;
 let located: Located[] = [];
 let lastResult: RunResult | undefined;
+let lastProblem: string | undefined;
+let host: PanelHost;
 let running: Promise<void> | undefined;
 let rerun = false;
 
@@ -34,11 +38,27 @@ export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel("API Guard");
   diagnostics = vscode.languages.createDiagnosticCollection(SOURCE);
   status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
-  status.command = "apiGuard.check";
+  status.command = "apiGuard.openPanel";
   status.text = "$(shield) API Guard";
-  status.tooltip = "Check the API contract";
+  status.tooltip = "Open API Guard";
   status.show();
   tree = new ResultsTree();
+  host = {
+    context,
+    root: projectRoot,
+    runner: runnerSettings,
+    setting,
+    lastResult: () => lastResult,
+    lastProblem: () => lastProblem,
+    checking: () => running !== undefined,
+    check: () => check(false),
+    reveal,
+    openReport,
+    showLog: () => output.show(),
+    gitUserName,
+    log,
+  };
+  const panel = (tab: Tab) => () => void GuardPanel.show(host, tab);
 
   context.subscriptions.push(
     output,
@@ -46,7 +66,10 @@ export function activate(context: vscode.ExtensionContext): void {
     status,
     vscode.window.registerTreeDataProvider("apiGuard.results", tree),
     vscode.commands.registerCommand("apiGuard.check", () => check(true)),
-    vscode.commands.registerCommand("apiGuard.init", init),
+    vscode.commands.registerCommand("apiGuard.openPanel", panel("overview")),
+    vscode.commands.registerCommand("apiGuard.init", panel("setup")),
+    vscode.commands.registerCommand("apiGuard.ask", panel("ask")),
+    vscode.commands.registerCommand("apiGuard.reviews", panel("reviews")),
     vscode.commands.registerCommand("apiGuard.acceptBreak", acceptBreak),
     vscode.commands.registerCommand("apiGuard.openReport", openReport),
     vscode.commands.registerCommand("apiGuard.showOutput", () => output.show()),
@@ -114,6 +137,7 @@ async function check(manual: boolean): Promise<void> {
   }
   running = doCheck(manual).finally(() => {
     running = undefined;
+    void GuardPanel.current?.refresh();
     if (rerun) {
       rerun = false;
       void check(false);
@@ -135,6 +159,7 @@ async function doCheck(manual: boolean): Promise<void> {
   const started = Date.now();
 
   status.text = "$(sync~spin) API: checking";
+  void GuardPanel.current?.refresh();
   log(`\n[${new Date().toLocaleTimeString()}] api-guard check`);
   // Conformance runs only if the API is up (see args.ts); otherwise it's
   // "not checked", never an error or a long wait.
@@ -166,14 +191,16 @@ async function doCheck(manual: boolean): Promise<void> {
     if (result.verdict === "passed") {
       void vscode.window.showInformationMessage(message);
     } else {
-      void vscode.window.showWarningMessage(message, "Open the report").then((pick) => {
-        if (pick) void openReport();
+      void vscode.window.showWarningMessage(message, "Open API Guard").then((pick) => {
+        if (pick) GuardPanel.show(host, "overview");
       });
     }
   }
 }
 
 function showProblem(message: string, manual: boolean): void {
+  lastProblem = message;
+  lastResult = undefined;
   status.text = "$(warning) API: can't check";
   status.tooltip = message;
   tree.showProblem(message);
@@ -182,15 +209,16 @@ function showProblem(message: string, manual: boolean): void {
   if (manual) {
     void vscode.window.showWarningMessage(`API Guard: ${message}`, "Show the log", "Set up API Guard").then((pick) => {
       if (pick === "Show the log") output.show();
-      if (pick === "Set up API Guard") void init();
+      if (pick === "Set up API Guard") GuardPanel.show(host, "setup");
     });
   }
 }
 
 function show(root: string, waiversFile: string | null, result: RunResult): void {
   lastResult = result;
+  lastProblem = undefined;
   status.text = statusText(result);
-  status.tooltip = headline(result) + "\nClick to check again";
+  status.tooltip = headline(result) + "\nClick to open API Guard";
   diagnostics.clear();
   located = [];
 
@@ -358,95 +386,16 @@ async function acceptBreak(change?: Change): Promise<void> {
   void check(false);
 }
 
-// --- set up ---------------------------------------------------------------------
+// --- show a change in the spec ---------------------------------------------------
 
-interface InitInfo {
-  status: "set_up" | "needs_spec";
-  exit_code: number;
-  text: string;
-  stack?: string | null;
-  note?: string;
-  steps?: string[];
-  spec?: string;
-  written?: string[];
-  kept?: string[];
-  create_spec_cmd?: string | null;
-  jenkins_stage?: string | null;
-  checks?: Record<string, boolean>;
-}
-
-async function init(): Promise<void> {
-  const root = projectRoot();
-  if (!root) {
-    void vscode.window.showWarningMessage("API Guard: open a project folder first.");
-    return;
-  }
-  log(`\n[${new Date().toLocaleTimeString()}] api-guard init --json`);
-  let out;
-  try {
-    out = await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: "Setting up API Guard…" },
-      () => runApiGuard(runnerSettings(), root, ["init", "--json"]),
-    );
-  } catch (error) {
-    void vscode.window.showErrorMessage(String(error instanceof Error ? error.message : error));
-    return;
-  }
-  log(`$ ${out.command}\n${out.stderr}`);
-
-  let info: InitInfo;
-  try {
-    info = JSON.parse(out.stdout) as InitInfo;
-  } catch {
-    log(out.stdout);
-    void vscode.window.showErrorMessage("API Guard: setup didn't finish. See the log.", "Show the log").then((p) => {
-      if (p) output.show();
-    });
-    return;
-  }
-  log(info.text);
-
-  if (info.status === "needs_spec") {
-    const commands = (info.steps ?? []).filter((l) => l.startsWith("$ ")).map((l) => l.slice(2));
-    const detail = [
-      info.stack ? `Detected: ${info.stack}` : "",
-      info.note ?? "",
-      "",
-      ...(info.steps ?? []).map((l) => (l.startsWith("$ ") ? `    ${l.slice(2)}` : l)),
-      "",
-      "Then run Set up again: it will find the spec and finish.",
-    ]
-      .filter((l, i, all) => l || all[i - 1])
-      .join("\n");
-    const pick = await vscode.window.showInformationMessage(
-      "API Guard needs an OpenAPI spec first",
-      { modal: true, detail },
-      ...(commands.length ? ["Copy the commands"] : []),
-      "Run Set up again",
-    );
-    if (pick === "Copy the commands") {
-      await vscode.env.clipboard.writeText(commands.join("\n"));
-    } else if (pick === "Run Set up again") {
-      void init();
-    }
-    return;
-  }
-
-  const wrote = info.written?.length ? `Wrote ${info.written.join(", ")}.` : "Nothing new written.";
-  const kept = info.kept?.length ? ` Kept your ${info.kept.join(", ")}.` : "";
-  const buttons = ["Open api-guard.yaml", "Check now"];
-  if (info.create_spec_cmd) buttons.unshift("Copy the spec command");
-  if (info.jenkins_stage) buttons.push("Copy the Jenkins stage");
-  const pick = await vscode.window.showInformationMessage(`API Guard is set up. ${wrote}${kept}`, ...buttons);
-  if (pick === "Open api-guard.yaml") {
-    await vscode.window.showTextDocument(vscode.Uri.file(path.join(root, "api-guard.yaml")));
-  } else if (pick === "Check now") {
-    void check(true);
-  } else if (pick === "Copy the spec command" && info.create_spec_cmd) {
-    await vscode.env.clipboard.writeText(info.create_spec_cmd);
-  } else if (pick === "Copy the Jenkins stage" && info.jenkins_stage) {
-    await vscode.env.clipboard.writeText(info.jenkins_stage);
-  }
+async function reveal(change: Change): Promise<void> {
+  const hit =
+    located.find((l) => l.change.fingerprint && l.change.fingerprint === change.fingerprint) ??
+    located.find((l) => l.change.text === change.text && l.change.path === change.path);
+  if (!hit) return;
+  const editor = await vscode.window.showTextDocument(hit.uri, { viewColumn: vscode.ViewColumn.Beside });
+  editor.selection = new vscode.Selection(hit.range.start, hit.range.end);
+  editor.revealRange(hit.range, vscode.TextEditorRevealType.InCenter);
 }
 
 // --- report ---------------------------------------------------------------------
@@ -467,5 +416,5 @@ async function openReport(): Promise<void> {
 
 // For tests: what the extension currently shows.
 export function _state() {
-  return { lastResult, located, status: status?.text };
+  return { lastResult, located, status: status?.text, panel: GuardPanel.current };
 }

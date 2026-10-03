@@ -171,6 +171,8 @@ def _run(root: Path, *, ci: str, force: bool, dry_run: bool) -> tuple[int, dict]
         "gitignore_added": ignored,
         "jenkins_stage": _jenkins(cmd) if "jenkins" in targets else None,
         "dry_run": dry_run,
+        # With --dry-run: what each file would contain, for a UI to preview.
+        "preview": {rel: files[rel] for rel in written} if dry_run else {},
     }
 
 
